@@ -1,0 +1,48 @@
+data:
+  activation_dir: data/pythia-6.9b/layer-16
+  window_size: 10
+  train_stride: 1
+  eval_stride: 10
+  num_workers: 4
+  cache_shards_per_worker: 1
+
+model:
+  type: proposed
+  d_llm: 4096
+  d_encoder: 256
+  num_layers: 3
+  num_heads: 4
+  mlp_ratio: 4
+  feature_dim: 8192
+  dropout: 0.0
+  attention: causal
+  num_local_views: 4
+  local_tokens: 3
+  sparse_bias: 0.0
+
+loss:
+  invariance_weight: 1.0
+  lambda_rdm: 1.0
+  rdm_projections: 32
+  target_active_fraction: 0.10
+  target_sigma: 1.0
+  reconstruction_weight: 1.0
+  sae_l1_coefficient: 0.001
+
+train:
+  seed: 42
+  device: cuda
+  precision: bfloat16
+  batch_size: 64
+  gradient_accumulation_steps: 8
+  max_steps: 100000
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  warmup_steps: 2000
+  max_grad_norm: 1.0
+  log_every: 20
+  eval_every: 1000
+  checkpoint_every: 5000
+  eval_batches: 50
+  output_dir: runs/pythia-6.9b-layer16/proposed-k3
+  resume_from: null

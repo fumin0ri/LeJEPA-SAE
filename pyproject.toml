@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lejepa-sae"
+version = "0.1.0"
+description = "Reconstruction-free sparse feature learning from LLM residual streams"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch==2.5.1",
+  "transformers>=4.46,<5",
+  "datasets>=3.1,<4",
+  "safetensors>=0.4.5",
+  "PyYAML>=6.0",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.8"]
+
+[project.scripts]
+lejepa-extract = "lejepa_sae.extract:main"
+lejepa-train = "lejepa_sae.train:main"
+lejepa-evaluate = "lejepa_sae.evaluate:main"
+lejepa-intervene = "lejepa_sae.intervene:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
