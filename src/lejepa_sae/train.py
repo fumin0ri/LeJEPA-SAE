@@ -30,7 +30,7 @@ from .losses import (
     rdm_regularization,
 )
 from .models import build_model
-from .views import full_view, sample_local_views
+from .views import full_view, sample_dimension_masks, sample_local_views
 
 
 def seed_everything(seed: int) -> None:
@@ -68,6 +68,67 @@ def compute_loss(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     model_type = config.model.type
     complete = full_view(residuals)
+
+    if model_type in {"single_token_jepa", "dimension_denoising_sae"}:
+        if residuals.shape[1] != 1:
+            raise ValueError(f"{model_type} requires one-token residual windows")
+        token_residuals = residuals[:, 0]
+        dimension_masks = sample_dimension_masks(
+            token_residuals,
+            config.model.num_local_views,
+            config.model.dimension_keep_fraction,
+        )
+
+        if model_type == "dimension_denoising_sae":
+            outputs = [model(token_residuals, mask) for mask in dimension_masks]
+            reconstruction = torch.stack(
+                [
+                    F.mse_loss(output.reconstruction.float(), token_residuals.float())
+                    for output in outputs
+                ]
+            ).mean()
+            sparsity = torch.stack(
+                [output.features.float().abs().mean() for output in outputs]
+            ).mean()
+            loss = config.loss.reconstruction_weight * reconstruction
+            loss = loss + config.loss.sae_l1_coefficient * sparsity
+            flattened = torch.cat([output.features for output in outputs], dim=0)
+            return loss, {
+                "loss": loss.detach(),
+                "reconstruction": reconstruction.detach(),
+                "l1": sparsity.detach(),
+                "active_fraction": (flattened > 0).float().mean().detach(),
+            }
+
+        global_features = model(token_residuals).features
+        local_features = [
+            model(token_residuals, mask).features for mask in dimension_masks
+        ]
+        invariance = invariance_loss(global_features, local_features)
+        all_features = [global_features, *local_features]
+        distribution = torch.stack(
+            [
+                rdm_regularization(
+                    features,
+                    config.loss.rdm_projections,
+                    config.loss.target_active_fraction,
+                    config.loss.target_sigma,
+                )
+                for features in all_features
+            ]
+        ).mean()
+        loss = (
+            config.loss.invariance_weight * invariance
+            + config.loss.lambda_rdm * distribution
+        )
+        flattened = torch.cat(all_features, dim=0)
+        return loss, {
+            "loss": loss.detach(),
+            "invariance": invariance.detach(),
+            "distribution": distribution.detach(),
+            "active_fraction": (flattened > 0).float().mean().detach(),
+            "feature_std": flattened.float().std(dim=0).mean().detach(),
+        }
 
     if model_type == "standard_sae":
         batch_indices = torch.arange(residuals.shape[0], device=residuals.device)

@@ -148,6 +148,47 @@ The window autoencoder uses the same small Transformer encoder and a capacity-co
 factorized Transformer decoder, avoiding a confounding 335M-parameter dense 8192→(10×4096)
 decoder.
 
+### Single-token dimension-mask comparison
+
+This controlled experiment uses one residual vector at a time and gives the JEPA model exactly
+the same `4096→8192→ReLU` sparse encoder as the standard SAE. Four local views each retain an
+independently sampled, exact half of the residual coordinates. Masking happens after subtraction
+of the learned pre-bias, so a missing raw coordinate is filled with that pre-bias rather than an
+out-of-distribution raw zero. Retained centered values use inverted-mask scaling (`1/q`, or 2× at
+the default `q=0.5`). No Transformer, CLS token, or decoder is present in `single_token_jepa`.
+
+Run the three-way controlled comparison:
+
+```bash
+bash scripts/run_single_token_comparison.sh
+```
+
+| Type | Input during training | Objective |
+|---|---|---|
+| `standard_sae` | complete `h_t` | full reconstruction + L1 |
+| `dimension_denoising_sae` | four independent half-coordinate views | reconstruct complete `h_t` + L1 |
+| `single_token_jepa` | complete global + four half-coordinate local views | invariance + rectified RDMReg |
+
+All three read the same activation shards with `window_size: 1`; their runs are written under the
+separate `runs/the-pile/pythia-6.9b-layer16/single-token/` directory. Change the retained fraction
+without changing the encoder interface with, for example,
+`--set model.dimension_keep_fraction=0.25`.
+
+Evaluate any run with its resolved config and checkpoint, for example:
+
+```bash
+lejepa-evaluate \
+  --config runs/the-pile/pythia-6.9b-layer16/single-token/single_token_jepa/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16/single-token/single_token_jepa/checkpoint-00100000.pt \
+  --max-windows 10000 \
+  --top-k 20 \
+  --output-dir runs/the-pile/pythia-6.9b-layer16/single-token/single_token_jepa/evaluation
+```
+
+All models report active fraction, dead features, feature variance, and top activating tokens.
+`single_token_jepa` additionally reports global-local MSE and feature-support Jaccard;
+`dimension_denoising_sae` reports full-input and masked-input reconstruction MSE.
+
 Bidirectional and sparsity ablations require only scalar overrides:
 
 ```bash

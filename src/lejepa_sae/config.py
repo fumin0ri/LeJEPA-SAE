@@ -12,7 +12,12 @@ ModelType = Literal[
     "jepa_sigreg",
     "standard_sae",
     "window_autoencoder",
+    "single_token_jepa",
+    "dimension_denoising_sae",
 ]
+
+TOKEN_VIEW_MODEL_TYPES = {"proposed", "sparse_jepa_full_view", "jepa_sigreg"}
+DIMENSION_VIEW_MODEL_TYPES = {"single_token_jepa", "dimension_denoising_sae"}
 
 
 @dataclass
@@ -38,6 +43,7 @@ class ModelConfig:
     attention: Literal["causal", "bidirectional"] = "causal"
     num_local_views: int = 4
     local_tokens: int = 3
+    dimension_keep_fraction: float = 0.5
     sparse_bias: float = 0.0
 
 
@@ -82,12 +88,22 @@ class ExperimentConfig:
     def validate(self) -> None:
         if self.data.window_size < 1:
             raise ValueError("data.window_size must be positive")
-        if not 1 <= self.model.local_tokens <= self.data.window_size:
+        if (
+            self.model.type in TOKEN_VIEW_MODEL_TYPES
+            and not 1 <= self.model.local_tokens <= self.data.window_size
+        ):
             raise ValueError("model.local_tokens must be in [1, data.window_size]")
         if self.model.d_encoder % self.model.num_heads:
             raise ValueError("model.d_encoder must be divisible by model.num_heads")
         if self.model.num_local_views < 1:
             raise ValueError("model.num_local_views must be positive")
+        if not 0.0 < self.model.dimension_keep_fraction <= 1.0:
+            raise ValueError("model.dimension_keep_fraction must be in (0, 1]")
+        if (
+            self.model.type in DIMENSION_VIEW_MODEL_TYPES
+            and self.data.window_size != 1
+        ):
+            raise ValueError("dimension-view models require data.window_size=1")
         if not 0.0 < self.loss.target_active_fraction < 1.0:
             raise ValueError("loss.target_active_fraction must be in (0, 1)")
         if self.train.gradient_accumulation_steps < 1:

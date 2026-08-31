@@ -96,20 +96,68 @@ class SparseJEPA(nn.Module):
         return ModelOutput(features=features)
 
 
-class StandardSAE(nn.Module):
+class SparseLinearFeatureEncoder(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.pre_bias = nn.Parameter(torch.zeros(config.d_llm))
         self.encoder = nn.Linear(config.d_llm, config.feature_dim)
-        self.decoder = nn.Linear(config.feature_dim, config.d_llm, bias=False)
         nn.init.zeros_(self.encoder.bias)
+
+    def prepare_input(
+        self,
+        residuals: torch.Tensor,
+        dimension_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if residuals.ndim < 2 or residuals.shape[-1] != self.pre_bias.numel():
+            raise ValueError("residuals must have shape [..., d_llm]")
+        centered = residuals - self.pre_bias
+        if dimension_mask is None:
+            return centered
+        if dimension_mask.shape != residuals.shape:
+            raise ValueError("dimension_mask must have the same shape as residuals")
+        retained_fraction = dimension_mask.float().mean(dim=-1, keepdim=True)
+        if torch.any(retained_fraction == 0):
+            raise ValueError("dimension_mask must retain at least one coordinate per item")
+        return centered * dimension_mask.to(centered.dtype) / retained_fraction
+
+    def encode_features(
+        self,
+        residuals: torch.Tensor,
+        dimension_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.encoder(self.prepare_input(residuals, dimension_mask)).relu()
+
+
+class StandardSAE(SparseLinearFeatureEncoder):
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__(config)
+        self.decoder = nn.Linear(config.feature_dim, config.d_llm, bias=False)
 
     def forward(
         self, residuals: torch.Tensor, positions: torch.Tensor | None = None
     ) -> ModelOutput:
         del positions
-        centered = residuals - self.pre_bias
-        features = self.encoder(centered).relu()
+        features = self.encode_features(residuals)
+        reconstruction = self.decoder(features) + self.pre_bias
+        return ModelOutput(features=features, reconstruction=reconstruction)
+
+
+class SingleTokenSparseJEPA(SparseLinearFeatureEncoder):
+    def forward(
+        self,
+        residuals: torch.Tensor,
+        dimension_mask: torch.Tensor | None = None,
+    ) -> ModelOutput:
+        return ModelOutput(features=self.encode_features(residuals, dimension_mask))
+
+
+class DimensionDenoisingSAE(StandardSAE):
+    def forward(
+        self,
+        residuals: torch.Tensor,
+        dimension_mask: torch.Tensor | None = None,
+    ) -> ModelOutput:
+        features = self.encode_features(residuals, dimension_mask)
         reconstruction = self.decoder(features) + self.pre_bias
         return ModelOutput(features=features, reconstruction=reconstruction)
 
@@ -157,6 +205,10 @@ class WindowAutoencoder(nn.Module):
 def build_model(config: ExperimentConfig) -> nn.Module:
     if config.model.type == "standard_sae":
         return StandardSAE(config.model)
+    if config.model.type == "single_token_jepa":
+        return SingleTokenSparseJEPA(config.model)
+    if config.model.type == "dimension_denoising_sae":
+        return DimensionDenoisingSAE(config.model)
     if config.model.type == "window_autoencoder":
         return WindowAutoencoder(config.model, config.data.window_size)
     return SparseJEPA(config.model, config.data.window_size)

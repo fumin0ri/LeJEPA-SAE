@@ -8,6 +8,7 @@ import torch
 from .config import load_config
 from .data import ActivationWindowDataset
 from .evaluate import load_model
+from .models import SingleTokenSparseJEPA
 from .views import full_view
 
 
@@ -20,8 +21,13 @@ def local_gradient_intervention(
 ) -> dict[str, torch.Tensor | float | int | None]:
     """Construct a sample-dependent residual intervention from ∇_H z_k."""
     residuals = residuals.detach().float().clone().requires_grad_(True)
-    complete = full_view(residuals)
-    features = model(complete.residuals, complete.positions).features
+    if isinstance(model, SingleTokenSparseJEPA):
+        if residuals.shape[1] != 1:
+            raise ValueError("SingleTokenSparseJEPA intervention requires a one-token window")
+        features = model(residuals[:, 0]).features
+    else:
+        complete = full_view(residuals)
+        features = model(complete.residuals, complete.positions).features
     if not 0 <= feature_index < features.shape[-1]:
         raise ValueError(f"feature_index must be in [0, {features.shape[-1] - 1}]")
     activation = features[:, feature_index].sum()
@@ -64,7 +70,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    if config.model.type in {"standard_sae", "window_autoencoder"}:
+    if config.model.type in {
+        "standard_sae",
+        "window_autoencoder",
+        "dimension_denoising_sae",
+    }:
         raise ValueError("Local-gradient intervention expects a JEPA-style span model")
     model = load_model(config, args.checkpoint, config.train.device)
     dataset = ActivationWindowDataset(

@@ -9,17 +9,21 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-from .config import ExperimentConfig, load_config
+from .config import TOKEN_VIEW_MODEL_TYPES, ExperimentConfig, load_config
 from .data import ActivationWindowDataset
 from .models import build_model
-from .train import autocast_context
-from .views import full_view, sample_local_views
+from .train import autocast_context, seed_everything
+from .views import full_view, sample_dimension_masks, sample_local_views
 
 
 def span_features(model, residuals: torch.Tensor, config: ExperimentConfig) -> torch.Tensor:
     if config.model.type == "standard_sae":
         token_features = model(residuals).features
         return token_features.max(dim=1).values
+    if config.model.type in {"single_token_jepa", "dimension_denoising_sae"}:
+        if residuals.shape[1] != 1:
+            raise ValueError("dimension-view evaluation requires one-token windows")
+        return model(residuals[:, 0]).features
     complete = full_view(residuals)
     return model(complete.residuals, complete.positions).features
 
@@ -59,6 +63,7 @@ def evaluate(
     support_epsilon: float,
     concept_labels_path: str | None = None,
 ) -> dict[str, float]:
+    seed_everything(config.train.seed)
     device = config.train.device
     dataset = ActivationWindowDataset(
         config.data.activation_dir,
@@ -86,6 +91,8 @@ def evaluate(
     maxima = torch.full((feature_dim,), -torch.inf)
     invariance_total = 0.0
     jaccard_total = 0.0
+    full_reconstruction_total = 0.0
+    masked_reconstruction_total = 0.0
     evaluated = 0
 
     concept_labels: dict[str, str] = {}
@@ -117,7 +124,7 @@ def evaluate(
         token_rows.extend(batch_token_ids.cpu())
         document_ids.extend(batch_document_ids)
 
-        if config.model.type not in {"standard_sae", "window_autoencoder"}:
+        if config.model.type in TOKEN_VIEW_MODEL_TYPES:
             complete = full_view(residuals)
             local = sample_local_views(residuals, 1, config.model.local_tokens)[0]
             with autocast_context(config):
@@ -131,6 +138,52 @@ def evaluate(
             intersection = (global_support & local_support).sum(dim=1)
             union = (global_support | local_support).sum(dim=1)
             jaccard_total += (intersection / union.clamp_min(1)).sum().item()
+
+        elif config.model.type == "single_token_jepa":
+            token_residuals = residuals[:, 0]
+            dimension_mask = sample_dimension_masks(
+                token_residuals, 1, config.model.dimension_keep_fraction
+            )[0]
+            with autocast_context(config):
+                global_features = model(token_residuals).features.float()
+                local_features = model(token_residuals, dimension_mask).features.float()
+            invariance_total += torch.nn.functional.mse_loss(
+                global_features, local_features, reduction="sum"
+            ).item() / feature_dim
+            global_support = global_features > support_epsilon
+            local_support = local_features > support_epsilon
+            intersection = (global_support & local_support).sum(dim=1)
+            union = (global_support | local_support).sum(dim=1)
+            jaccard_total += (intersection / union.clamp_min(1)).sum().item()
+
+        elif config.model.type == "dimension_denoising_sae":
+            token_residuals = residuals[:, 0]
+            dimension_mask = sample_dimension_masks(
+                token_residuals, 1, config.model.dimension_keep_fraction
+            )[0]
+            with autocast_context(config):
+                full_output = model(token_residuals)
+                masked_output = model(token_residuals, dimension_mask)
+            full_reconstruction_total += torch.nn.functional.mse_loss(
+                full_output.reconstruction.float(),
+                token_residuals.float(),
+                reduction="sum",
+            ).item() / config.model.d_llm
+            masked_reconstruction_total += torch.nn.functional.mse_loss(
+                masked_output.reconstruction.float(),
+                token_residuals.float(),
+                reduction="sum",
+            ).item() / config.model.d_llm
+
+        elif config.model.type == "standard_sae":
+            with autocast_context(config):
+                full_output = model(residuals)
+            elements_per_window = residuals.shape[1] * config.model.d_llm
+            full_reconstruction_total += torch.nn.functional.mse_loss(
+                full_output.reconstruction.float(),
+                residuals.float(),
+                reduction="sum",
+            ).item() / elements_per_window
 
         for row, document_id in enumerate(batch_document_ids):
             label = concept_labels.get(str(document_id))
@@ -149,9 +202,13 @@ def evaluate(
         "dead_feature_fraction": float((maxima <= support_epsilon).float().mean()),
         "mean_feature_std": float(variance.sqrt().mean()),
     }
-    if config.model.type not in {"standard_sae", "window_autoencoder"}:
+    if config.model.type in {*TOKEN_VIEW_MODEL_TYPES, "single_token_jepa"}:
         result["global_local_mse"] = invariance_total / evaluated
         result["support_jaccard"] = jaccard_total / evaluated
+    if config.model.type in {"standard_sae", "dimension_denoising_sae"}:
+        result["full_reconstruction_mse"] = full_reconstruction_total / evaluated
+    if config.model.type == "dimension_denoising_sae":
+        result["masked_reconstruction_mse"] = masked_reconstruction_total / evaluated
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)

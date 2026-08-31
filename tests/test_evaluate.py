@@ -1,0 +1,111 @@
+import json
+
+import pytest
+import torch
+from safetensors.torch import save_file
+
+from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, TrainConfig
+from lejepa_sae.evaluate import evaluate
+from lejepa_sae.models import build_model
+
+
+class FakeTokenizer:
+    def decode(self, token_ids):
+        return " ".join(str(token_id) for token_id in token_ids)
+
+
+def make_test_store(tmp_path):
+    activation_dir = tmp_path / "activations"
+    test_dir = activation_dir / "test"
+    test_dir.mkdir(parents=True)
+    save_file(
+        {
+            "activations": torch.randn(5, 8),
+            "token_ids": torch.arange(5, dtype=torch.int32),
+        },
+        str(test_dir / "shard-00000.safetensors"),
+    )
+    manifest = {
+        "model": "fake-tokenizer",
+        "revision": "test",
+        "d_llm": 8,
+        "shards": [
+            {
+                "file": "test/shard-00000.safetensors",
+                "split": "test",
+                "sequences": [
+                    {
+                        "offset": 0,
+                        "length": 5,
+                        "document_id": "test-document",
+                        "segment_index": 0,
+                    }
+                ],
+            }
+        ],
+    }
+    (activation_dir / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    return activation_dir
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected_metrics"),
+    [
+        ("standard_sae", {"full_reconstruction_mse"}),
+        ("single_token_jepa", {"global_local_mse", "support_jaccard"}),
+        (
+            "dimension_denoising_sae",
+            {"full_reconstruction_mse", "masked_reconstruction_mse"},
+        ),
+    ],
+)
+def test_single_token_evaluation_metrics(
+    tmp_path, monkeypatch, model_type, expected_metrics
+):
+    activation_dir = make_test_store(tmp_path)
+    config = ExperimentConfig(
+        data=DataConfig(
+            activation_dir=str(activation_dir),
+            window_size=1,
+            eval_stride=1,
+            num_workers=0,
+        ),
+        model=ModelConfig(
+            type=model_type,
+            d_llm=8,
+            d_encoder=8,
+            num_layers=1,
+            num_heads=2,
+            feature_dim=16,
+            local_tokens=1,
+            num_local_views=2,
+            dimension_keep_fraction=0.5,
+        ),
+        train=TrainConfig(device="cpu", precision="float32", batch_size=2),
+    )
+    config.validate()
+    checkpoint = tmp_path / f"{model_type}.pt"
+    torch.save({"model": build_model(config).state_dict()}, checkpoint)
+    monkeypatch.setattr(
+        "lejepa_sae.evaluate.AutoTokenizer.from_pretrained",
+        lambda *_args, **_kwargs: FakeTokenizer(),
+    )
+
+    result = evaluate(
+        config,
+        checkpoint,
+        tmp_path / f"evaluation-{model_type}",
+        max_windows=4,
+        top_k=2,
+        support_epsilon=0.0,
+    )
+
+    assert expected_metrics <= result.keys()
+    assert result["windows"] == 4
+    assert len(
+        (tmp_path / f"evaluation-{model_type}" / "top_spans.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ) == 16

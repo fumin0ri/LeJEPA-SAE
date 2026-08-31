@@ -1,10 +1,19 @@
 """LeJEPA-SAE: sparse JEPA-style features for LLM residual streams."""
 
 from .config import ExperimentConfig, load_config
-from .models import SparseJEPA, StandardSAE, WindowAutoencoder, build_model
+from .models import (
+    DimensionDenoisingSAE,
+    SingleTokenSparseJEPA,
+    SparseJEPA,
+    StandardSAE,
+    WindowAutoencoder,
+    build_model,
+)
 
 __all__ = [
     "ExperimentConfig",
+    "DimensionDenoisingSAE",
+    "SingleTokenSparseJEPA",
     "SparseJEPA",
     "StandardSAE",
     "WindowAutoencoder",

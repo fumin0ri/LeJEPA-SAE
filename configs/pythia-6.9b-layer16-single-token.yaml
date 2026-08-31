@@ -1,13 +1,13 @@
 data:
   activation_dir: data/the-pile/pythia-6.9b/layer-16
-  window_size: 10
+  window_size: 1
   train_stride: 1
-  eval_stride: 10
+  eval_stride: 1
   num_workers: 4
   cache_shards_per_worker: 1
 
 model:
-  type: proposed
+  type: single_token_jepa
   d_llm: 4096
   d_encoder: 256
   num_layers: 3
@@ -17,7 +17,7 @@ model:
   dropout: 0.0
   attention: causal
   num_local_views: 4
-  local_tokens: 3
+  local_tokens: 1
   dimension_keep_fraction: 0.5
   sparse_bias: 0.0
 
@@ -45,5 +45,5 @@ train:
   eval_every: 1000
   checkpoint_every: 5000
   eval_batches: 50
-  output_dir: runs/the-pile/pythia-6.9b-layer16/proposed-k3
+  output_dir: runs/the-pile/pythia-6.9b-layer16/single-token/single-token-jepa-q50
   resume_from: null

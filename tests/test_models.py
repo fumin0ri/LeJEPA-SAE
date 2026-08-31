@@ -1,5 +1,6 @@
 import pytest
 import torch
+import torch.nn.functional as F
 
 from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig
 from lejepa_sae.models import SharedWindowEncoder, build_model
@@ -7,8 +8,9 @@ from lejepa_sae.train import compute_loss
 
 
 def tiny_config(model_type: str = "proposed") -> ExperimentConfig:
+    window_size = 1 if model_type in {"single_token_jepa", "dimension_denoising_sae"} else 5
     config = ExperimentConfig(
-        data=DataConfig(window_size=5, num_workers=0),
+        data=DataConfig(window_size=window_size, num_workers=0),
         model=ModelConfig(
             type=model_type,
             d_llm=8,
@@ -18,7 +20,7 @@ def tiny_config(model_type: str = "proposed") -> ExperimentConfig:
             mlp_ratio=2,
             feature_dim=16,
             num_local_views=2,
-            local_tokens=2,
+            local_tokens=min(2, window_size),
         ),
     )
     config.loss.rdm_projections = 4
@@ -50,13 +52,15 @@ def test_bidirectional_mask_still_blocks_token_to_cls():
         "jepa_sigreg",
         "standard_sae",
         "window_autoencoder",
+        "single_token_jepa",
+        "dimension_denoising_sae",
     ],
 )
 def test_all_models_complete_backward_step(model_type):
     torch.manual_seed(2)
     config = tiny_config(model_type)
     model = build_model(config)
-    residuals = torch.randn(4, 5, 8)
+    residuals = torch.randn(4, config.data.window_size, 8)
     loss, metrics = compute_loss(model, residuals, config)
     loss.backward()
     assert torch.isfinite(loss)
@@ -71,3 +75,54 @@ def test_positions_affect_encoding():
     first = model(residuals, torch.tensor([[0, 1]])).features
     second = model(residuals, torch.tensor([[0, 4]])).features
     assert not torch.equal(first, second)
+
+
+def test_masked_encoder_fills_missing_coordinates_with_pre_bias():
+    config = tiny_config("single_token_jepa")
+    model = build_model(config)
+    with torch.no_grad():
+        model.pre_bias.copy_(torch.arange(8).float())
+    residuals = torch.arange(8).float().unsqueeze(0) + 2.0
+    mask = torch.tensor([[True, False, True, False, True, False, True, False]])
+    prepared = model.prepare_input(residuals, mask)
+    assert torch.equal(prepared[~mask], torch.zeros(4))
+    torch.testing.assert_close(prepared[mask], torch.full((4,), 4.0))
+
+
+def test_dense_mask_projection_matches_coordinate_indexed_projection():
+    torch.manual_seed(5)
+    config = tiny_config("single_token_jepa")
+    model = build_model(config)
+    residuals = torch.randn(3, 8)
+    masks = torch.tensor(
+        [
+            [1, 1, 0, 0, 1, 0, 1, 0],
+            [0, 1, 1, 0, 0, 1, 0, 1],
+            [1, 0, 1, 1, 0, 0, 0, 1],
+        ],
+        dtype=torch.bool,
+    )
+    dense = model.encoder(model.prepare_input(residuals, masks))
+    indexed = []
+    for row in range(residuals.shape[0]):
+        selected = masks[row]
+        centered = residuals[row, selected] - model.pre_bias[selected]
+        indexed.append(
+            F.linear(centered / 0.5, model.encoder.weight[:, selected], model.encoder.bias)
+        )
+    torch.testing.assert_close(dense, torch.stack(indexed))
+
+
+def test_dimension_view_config_requires_one_token():
+    config = tiny_config("single_token_jepa")
+    config.data.window_size = 2
+    with pytest.raises(ValueError, match="window_size=1"):
+        config.validate()
+
+
+@pytest.mark.parametrize("keep_fraction", [0.0, 1.1])
+def test_dimension_keep_fraction_is_validated(keep_fraction):
+    config = tiny_config("single_token_jepa")
+    config.model.dimension_keep_fraction = keep_fraction
+    with pytest.raises(ValueError, match="dimension_keep_fraction"):
+        config.validate()

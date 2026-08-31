@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import torch
 from safetensors.torch import save_file
 
@@ -7,7 +8,16 @@ from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, TrainCo
 from lejepa_sae.train import train
 
 
-def test_end_to_end_cpu_training_and_checkpoint(tmp_path):
+@pytest.mark.parametrize(
+    ("model_type", "window_size"),
+    [
+        ("proposed", 5),
+        ("standard_sae", 1),
+        ("single_token_jepa", 1),
+        ("dimension_denoising_sae", 1),
+    ],
+)
+def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, window_size):
     activation_dir = tmp_path / "activations"
     shards = []
     for split_index, split in enumerate(("train", "validation", "test")):
@@ -43,10 +53,11 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path):
     config = ExperimentConfig(
         data=DataConfig(
             activation_dir=str(activation_dir),
-            window_size=5,
+            window_size=window_size,
             num_workers=0,
         ),
         model=ModelConfig(
+            type=model_type,
             d_llm=8,
             d_encoder=8,
             num_layers=1,
@@ -54,7 +65,7 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path):
             mlp_ratio=2,
             feature_dim=16,
             num_local_views=2,
-            local_tokens=2,
+            local_tokens=min(2, window_size),
         ),
         train=TrainConfig(
             device="cpu",
@@ -67,7 +78,7 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path):
             eval_every=1,
             checkpoint_every=1,
             eval_batches=1,
-            output_dir=str(tmp_path / "run"),
+            output_dir=str(tmp_path / f"run-{model_type}"),
         ),
     )
     config.loss.rdm_projections = 4
@@ -76,5 +87,6 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path):
     assert checkpoint.exists()
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     assert state["step"] == 2
-    assert (tmp_path / "run" / "config.resolved.yaml").exists()
-    assert len((tmp_path / "run" / "metrics.jsonl").read_text().splitlines()) == 4
+    run_dir = tmp_path / f"run-{model_type}"
+    assert (run_dir / "config.resolved.yaml").exists()
+    assert len((run_dir / "metrics.jsonl").read_text().splitlines()) == 4
