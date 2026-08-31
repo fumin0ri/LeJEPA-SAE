@@ -114,15 +114,27 @@ def _document_identifier(
     if id_column and id_column in example:
         return str(example[id_column])
     digest = hashlib.blake2b(text.encode("utf-8", errors="ignore"), digest_size=12).hexdigest()
-    return f"{index}:{digest}"
+    return digest
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extract document-safe Pythia residual shards")
+    parser = argparse.ArgumentParser(description="Extract split-safe Pythia residual shards")
     parser.add_argument("--dataset", required=True, help="Hugging Face dataset name")
     parser.add_argument("--dataset-config", default=None)
+    parser.add_argument("--dataset-revision", default="main")
+    parser.add_argument(
+        "--data-files",
+        action="append",
+        default=None,
+        help="Local/remote data file or glob (repeatable; useful with --dataset json)",
+    )
     parser.add_argument("--source-split", default="train")
     parser.add_argument("--text-column", default="text")
+    parser.add_argument(
+        "--token-ids-column",
+        default=None,
+        help="Use pre-tokenized IDs from this column instead of tokenizing text",
+    )
     parser.add_argument("--id-column", default=None)
     parser.add_argument("--streaming", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-documents", type=int, default=None)
@@ -172,6 +184,8 @@ def extract(args: argparse.Namespace) -> Path:
     dataset = load_dataset(
         args.dataset,
         args.dataset_config,
+        data_files=args.data_files,
+        revision=args.dataset_revision,
         split=args.source_split,
         streaming=args.streaming,
     )
@@ -183,18 +197,38 @@ def extract(args: argparse.Namespace) -> Path:
         for index, example in enumerate(progress):
             if args.max_documents is not None and processed_documents >= args.max_documents:
                 break
-            text = example.get(args.text_column)
-            if not isinstance(text, str) or not text.strip():
-                continue
-            document_id = _document_identifier(example, text, index, args.id_column)
+            if args.token_ids_column:
+                raw_token_ids = example.get(args.token_ids_column)
+                if raw_token_ids is None:
+                    continue
+                token_ids = torch.as_tensor(raw_token_ids, dtype=torch.long).flatten()
+                if token_ids.numel() == 0:
+                    continue
+                identity = hashlib.blake2b(
+                    token_ids.numpy().tobytes(), digest_size=12
+                ).hexdigest()
+            else:
+                text = example.get(args.text_column)
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                identity = text
+                token_ids = tokenizer(
+                    text, add_special_tokens=False, return_tensors="pt"
+                )
+                token_ids = token_ids["input_ids"][0]
+            document_id = _document_identifier(
+                example, identity, index, args.id_column
+            )
             split = document_split(
                 document_id,
                 args.validation_fraction,
                 args.test_fraction,
                 args.split_seed,
             )
-            token_ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")
-            token_ids = token_ids["input_ids"][0]
+            if token_ids.min() < 0 or token_ids.max() >= model.config.vocab_size:
+                raise ValueError(
+                    f"Token IDs for source unit {document_id!r} are outside model vocabulary"
+                )
             segment_index = 0
             for start in range(0, token_ids.numel(), args.context_length):
                 segment = token_ids[start : start + args.context_length]
@@ -228,7 +262,14 @@ def extract(args: argparse.Namespace) -> Path:
         "minimum_window_size": args.window_size,
         "dataset": args.dataset,
         "dataset_config": args.dataset_config,
+        "dataset_revision": args.dataset_revision,
+        "data_files": args.data_files,
         "source_split": args.source_split,
+        "input_format": "token_ids" if args.token_ids_column else "text",
+        "text_column": None if args.token_ids_column else args.text_column,
+        "token_ids_column": args.token_ids_column,
+        "id_column": args.id_column,
+        "split_unit": "source_sequence" if args.token_ids_column else "document",
         "split_seed": args.split_seed,
         "validation_fraction": args.validation_fraction,
         "test_fraction": args.test_fraction,

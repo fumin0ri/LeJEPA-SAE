@@ -1,5 +1,5 @@
 data:
-  activation_dir: data/pythia-6.9b/layer-16
+  activation_dir: data/the-pile/pythia-6.9b/layer-16
   window_size: 10
   train_stride: 1
   eval_stride: 10
@@ -44,5 +44,5 @@ train:
   eval_every: 1000
   checkpoint_every: 5000
   eval_batches: 50
-  output_dir: runs/pythia-6.9b-layer16/proposed-k3
+  output_dir: runs/the-pile/pythia-6.9b-layer16/proposed-k3
   resume_from: null

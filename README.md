@@ -59,27 +59,47 @@ python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 ## 1. Extract the exact residual hook point
 
 The extractor loads `AutoModel` (not the LM head), freezes it, and hooks the zero-based Pythia
-block output. Documents are assigned to train/validation/test by a stable hash before they are
-segmented. Consequently adjacent windows and separate context segments from one document can
-never leak across splits.
+block output. The default corpus is the standard (non-deduplicated) The Pile, matching
+`EleutherAI/pythia-6.9b` rather than the `-deduped` model family.
 
-Example with a Hugging Face text dataset:
+The practical single-workstation preset uses EleutherAI's official 5M-row random sample of the
+Pythia-tokenized standard Pile. It consumes the existing `Tokens` IDs directly, avoiding a
+tokenization mismatch:
+
+```bash
+bash scripts/extract_the_pile.sh
+```
+
+Each sampled source sequence contains 64 Pythia tokens. The preset extracts 10,000 sequences
+(640k tokens and about 4.9 GiB of bf16 activations). Set `MAX_SEQUENCES=100000` to scale it to
+6.4M tokens and about 49 GiB. The sampled dataset calls the standard, non-deduplicated variant `duped`:
+`EleutherAI/pile-duped-pythia-random-sampled`.
+The extraction script pins its current dataset commit instead of following a mutable `main`.
+
+Each sampled 64-token source sequence is hash-assigned before segmentation, so its
+adjacent windows cannot cross splits. The random-sample table does not expose original Pile
+document IDs, however, so strict original-document isolation cannot be proven in this mode. For
+that requirement, point the extractor at locally obtained raw Pile JSONL shards, where one row is
+one original document:
 
 ```bash
 lejepa-extract \
-  --dataset HuggingFaceFW/fineweb \
-  --dataset-config sample-10BT \
+  --dataset json \
+  --data-files '/datasets/the-pile/train/*.jsonl.zst' \
   --source-split train \
   --text-column text \
   --model EleutherAI/pythia-6.9b \
-  --revision main \
   --layer 16 \
   --context-length 512 \
   --window-size 10 \
   --dtype bfloat16 \
-  --shard-tokens 50000 \
-  --output-dir data/pythia-6.9b/layer-16
+  --output-dir data/the-pile/pythia-6.9b/layer-16
 ```
+
+Raw-document mode assigns each row to train/validation/test by a stable content hash before it is
+segmented. Consequently adjacent windows and all context segments from one document remain in one
+split. Review the licenses and access terms of every Pile component before obtaining or using the
+raw corpus.
 
 Use the same `block_output:16` manifest for every method. The activation shards contain residuals
 and token IDs; token IDs are retained only for decoding evaluation examples and never enter an
@@ -141,11 +161,11 @@ lejepa-train --config configs/pythia-6.9b-layer16.yaml \
 
 ```bash
 lejepa-evaluate \
-  --config runs/pythia-6.9b-layer16/proposed-k3/config.resolved.yaml \
-  --checkpoint runs/pythia-6.9b-layer16/proposed-k3/checkpoint-00100000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16/proposed-k3/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed-k3/checkpoint-00100000.pt \
   --max-windows 10000 \
   --top-k 20 \
-  --output-dir runs/pythia-6.9b-layer16/proposed-k3/evaluation
+  --output-dir runs/the-pile/pythia-6.9b-layer16/proposed-k3/evaluation
 ```
 
 Outputs include feature sparsity/deadness, global-local MSE, exact-support Jaccard, and a JSONL
@@ -161,8 +181,8 @@ sample-dependent and should not be presented as SAE-style global controllability
 
 ```bash
 lejepa-intervene \
-  --config runs/pythia-6.9b-layer16/proposed-k3/config.resolved.yaml \
-  --checkpoint runs/pythia-6.9b-layer16/proposed-k3/checkpoint-00100000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16/proposed-k3/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed-k3/checkpoint-00100000.pt \
   --window-index 42 \
   --feature-index 123 \
   --alpha 5 \
