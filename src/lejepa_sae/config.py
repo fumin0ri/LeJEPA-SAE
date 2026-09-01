@@ -33,6 +33,8 @@ class ModelConfig:
 class LossConfig:
     lambda_rdm: float = 125.0
     rdm_projections: int = 8192
+    axis_projections: int = 512
+    axis_weight: float = 1.0
     target_distribution: str = "rectified_lp_distribution"
     lp_norm_parameter: float = 1.0
     mean_shift_value: float = 0.0
@@ -83,6 +85,10 @@ class ExperimentConfig:
             raise ValueError("model.dimension_keep_fraction must be in (0, 1]")
         if self.loss.rdm_projections < 1:
             raise ValueError("loss.rdm_projections must be positive")
+        if not 1 <= self.loss.axis_projections <= self.model.feature_dim:
+            raise ValueError("loss.axis_projections must be in [1, model.feature_dim]")
+        if self.loss.axis_weight <= 0:
+            raise ValueError("loss.axis_weight must be positive")
         if self.model.type == "proposed":
             if self.loss.target_distribution != "rectified_lp_distribution":
                 raise ValueError(

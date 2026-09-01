@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+
+
+@dataclass(frozen=True)
+class RDMRegularizationOutput:
+    loss: torch.Tensor
+    random_loss: torch.Tensor
+    axis_loss: torch.Tensor
+    random_view_losses: torch.Tensor
+    axis_view_losses: torch.Tensor
 
 
 def generalized_gaussian_unit_variance_sigma(lp_norm_parameter: float) -> float:
@@ -81,6 +91,19 @@ def random_unit_projections(
     return projections.to(dtype=dtype)
 
 
+def random_axis_indices(
+    num_axes: int,
+    feature_dim: int,
+    *,
+    device: torch.device,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Choose coordinate axes without replacement for one optimizer step."""
+    if not 1 <= num_axes <= feature_dim:
+        raise ValueError("num_axes must be in [1, feature_dim]")
+    return torch.randperm(feature_dim, device=device, generator=generator)[:num_axes]
+
+
 def sliced_wasserstein_2_with_projections(
     values: torch.Tensor,
     targets: torch.Tensor,
@@ -109,15 +132,41 @@ def sliced_wasserstein_2_with_projections(
     return difference.square().mean(dim=(-2, -1))
 
 
+def sliced_wasserstein_2_on_axes(
+    values: torch.Tensor,
+    targets: torch.Tensor,
+    axis_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Empirical W2 on selected coordinate marginals without materializing one-hot vectors."""
+    if values.shape != targets.shape or values.ndim not in {2, 3}:
+        raise ValueError(
+            "values and targets must have the same [batch, features] or "
+            "[views, batch, features] shape"
+        )
+    if axis_indices.ndim != 1 or axis_indices.numel() < 1:
+        raise ValueError("axis_indices must be a non-empty vector")
+    if axis_indices.dtype != torch.long:
+        raise ValueError("axis_indices must have dtype torch.long")
+
+    selected_values = values.index_select(-1, axis_indices).sort(dim=-2).values
+    with torch.no_grad():
+        selected_targets = targets.index_select(-1, axis_indices).sort(dim=-2).values
+    difference = selected_values.float() - selected_targets.float()
+    return difference.square().mean(dim=(-2, -1))
+
+
 def rectified_lp_rdm_regularization(
     feature_views: list[torch.Tensor] | torch.Tensor,
     num_projections: int,
+    num_axis_projections: int,
+    axis_weight: float,
     lp_norm_parameter: float,
     mean_shift_value: float,
     generator: torch.Generator | None = None,
     projection_vectors: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, list[torch.Tensor]]:
-    """Paper-aligned multi-view RDMReg with shared directions and independent RGG targets."""
+    axis_indices: torch.Tensor | None = None,
+) -> RDMRegularizationOutput:
+    """Multi-view RDMReg with random directions and direct coordinate marginals."""
     if isinstance(feature_views, list):
         if not feature_views:
             raise ValueError("At least one feature view is required")
@@ -141,6 +190,18 @@ def rectified_lp_rdm_regularization(
     elif projection_vectors.shape != (num_projections, reference.shape[1]):
         raise ValueError("projection_vectors shape does not match num_projections/features")
     projection_vectors = projection_vectors.to(device=reference.device, dtype=reference.dtype)
+    if axis_weight < 0:
+        raise ValueError("axis_weight must be non-negative")
+    if axis_indices is None:
+        axis_indices = random_axis_indices(
+            num_axis_projections,
+            reference.shape[1],
+            device=reference.device,
+            generator=generator,
+        )
+    elif axis_indices.shape != (num_axis_projections,):
+        raise ValueError("axis_indices shape does not match num_axis_projections")
+    axis_indices = axis_indices.to(device=reference.device, dtype=torch.long)
 
     sigma = generalized_gaussian_unit_variance_sigma(lp_norm_parameter)
     targets = sample_rectified_generalized_gaussian_like(
@@ -150,11 +211,21 @@ def rectified_lp_rdm_regularization(
         sigma,
         generator,
     )
-    view_loss_tensor = sliced_wasserstein_2_with_projections(
+    random_view_losses = sliced_wasserstein_2_with_projections(
         feature_tensor, targets, projection_vectors
     )
-    view_losses = list(view_loss_tensor.unbind())
-    return view_loss_tensor.mean(), view_losses
+    axis_view_losses = sliced_wasserstein_2_on_axes(
+        feature_tensor, targets, axis_indices
+    )
+    random_loss = random_view_losses.mean()
+    axis_loss = axis_view_losses.mean()
+    return RDMRegularizationOutput(
+        loss=random_loss + axis_weight * axis_loss,
+        random_loss=random_loss,
+        axis_loss=axis_loss,
+        random_view_losses=random_view_losses,
+        axis_view_losses=axis_view_losses,
+    )
 
 
 @torch.no_grad()

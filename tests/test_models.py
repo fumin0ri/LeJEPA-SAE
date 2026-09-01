@@ -20,6 +20,7 @@ def tiny_config(model_type: str = "proposed") -> ExperimentConfig:
         ),
     )
     config.loss.rdm_projections = 4
+    config.loss.axis_projections = 4
     config.validate()
     return config
 
@@ -49,6 +50,12 @@ def test_proposed_reports_collapse_diagnostics():
     expected = {
         "global_distribution",
         "local_distribution",
+        "random_distribution",
+        "axis_distribution",
+        "global_random_distribution",
+        "local_random_distribution",
+        "global_axis_distribution",
+        "local_axis_distribution",
         "l0_sparsity",
         "l1_sparsity",
         "global_active_fraction",
@@ -72,8 +79,14 @@ def test_proposed_can_skip_expensive_diagnostics():
         "loss",
         "invariance",
         "distribution",
+        "random_distribution",
+        "axis_distribution",
         "global_distribution",
         "local_distribution",
+        "global_random_distribution",
+        "local_random_distribution",
+        "global_axis_distribution",
+        "local_axis_distribution",
     } == metrics.keys()
     assert "feature_std" not in metrics
 
@@ -170,6 +183,9 @@ def test_dimension_keep_fraction_is_validated(keep_fraction):
     ("field", "value", "message"),
     [
         ("rdm_projections", 0, "rdm_projections"),
+        ("axis_projections", 0, "axis_projections"),
+        ("axis_projections", 17, "axis_projections"),
+        ("axis_weight", 0.0, "axis_weight"),
         ("lp_norm_parameter", 0.0, "lp_norm_parameter"),
         ("target_distribution", "rectified_gaussian", "target_distribution"),
         ("mode_of_sigma", "sigma_RGN", "mode_of_sigma"),
@@ -194,6 +210,8 @@ def test_main_preset_uses_single_token_paper_defaults():
     assert config.loss.mode_of_sigma == "sigma_GN"
     assert config.loss.projection_vectors_type == "random"
     assert config.loss.rdm_projections == 8192
+    assert config.loss.axis_projections == 512
+    assert config.loss.axis_weight == 1.0
     assert config.loss.invariance_weight == 25.0
     assert config.loss.lambda_rdm == 125.0
     assert config.train.batch_size == 512
@@ -201,5 +219,5 @@ def test_main_preset_uses_single_token_paper_defaults():
     assert config.train.max_steps == 10000
     assert config.train.eval_batches == 12
     assert config.train.checkpoint_every == 10000
-    assert config.train.output_dir.endswith("/proposed")
+    assert config.train.output_dir.endswith("/proposed-axis512")
     assert config.train.resume_from is None

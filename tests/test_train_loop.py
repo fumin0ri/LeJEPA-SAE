@@ -69,6 +69,7 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
         ),
     )
     config.loss.rdm_projections = 4
+    config.loss.axis_projections = 4
     checkpoint = train(config)
 
     assert checkpoint.exists()

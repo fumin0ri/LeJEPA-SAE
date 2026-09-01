@@ -21,12 +21,16 @@ Transformer, CLS token, decoder, target encoder, or stop-gradient.
 The objective is:
 
 ```text
-L = 25 · mean_v MSE(z_global, z_local_v) + 125 · mean_views RDMReg(z_view)
+L = 25 · mean_v MSE(z_global, z_local_v)
+  + 125 · (L_random-RDMReg + 1.0 · L_axis-RDMReg)
 ```
 
 RDMReg follows Rectified LpJEPA: every view is matched to an independent
-`ReLU(Laplace(0, 1/√2))` target with 8192 shared random unit projections. Projection matmul is
-mixed precision; sorting and loss reduction are float32.
+`ReLU(Laplace(0, 1/√2))` target with 8192 shared random unit projections. In addition, every
+optimizer step samples 512 coordinate axes without replacement and directly matches the selected
+feature marginals. Axis indices are shared by all five views, and the same view-specific target is
+used by both losses. Coordinate values are gathered directly; no one-hot matrix is materialized.
+Projection matmul is mixed precision; sorting and loss reduction are float32.
 
 ## Environment
 
@@ -79,8 +83,12 @@ bash scripts/run_proposed.sh
 ```
 
 The pilot preset uses batch 512, no gradient accumulation, 10,000 steps, and a fresh output at
-`runs/the-pile/pythia-6.9b-layer16/proposed`. If batch 512 is out of memory, preserve the effective
-batch in this order:
+`runs/the-pile/pythia-6.9b-layer16/proposed-axis512`. The output is deliberately separate from
+pre-axis checkpoints and starts from a fresh initialization. Do not resume a collapsed checkpoint:
+axis loss discourages feature death while gradients still cross ReLU, but cannot guarantee revival
+once every sample for a feature is in ReLU's negative region.
+
+If batch 512 is out of memory, preserve the effective batch in this order:
 
 ```bash
 BATCH_SIZE=256 GRADIENT_ACCUMULATION_STEPS=2 bash scripts/run_proposed.sh
@@ -88,7 +96,10 @@ BATCH_SIZE=128 GRADIENT_ACCUMULATION_STEPS=4 bash scripts/run_proposed.sh
 ```
 
 `MAX_STEPS` and `EVAL_BATCHES` are also environment overrides. Training logs core losses every
-batch, collapse diagnostics at log steps, interval throughput, and CUDA peak memory.
+batch—including separate `random_distribution` and `axis_distribution` values—collapse
+diagnostics at log steps, interval throughput, and CUDA peak memory. Axis ablations can use, for
+example, `AXIS_PROJECTIONS=256 AXIS_WEIGHT=2.0 bash scripts/run_proposed.sh`; the default output
+directory includes the selected axis count.
 
 The optional single-token reconstruction baselines remain available:
 
@@ -106,11 +117,11 @@ bash scripts/run_comparison.sh
 
 ```bash
 lejepa-evaluate \
-  --config runs/the-pile/pythia-6.9b-layer16/proposed/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed/checkpoint-00010000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16/proposed-axis512/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed-axis512/checkpoint-00010000.pt \
   --max-tokens 10000 \
   --top-k 20 \
-  --output-dir runs/the-pile/pythia-6.9b-layer16/proposed/evaluation
+  --output-dir runs/the-pile/pythia-6.9b-layer16/proposed-axis512/evaluation
 ```
 
 Open `evaluation/index.html` first. Evaluation writes:
@@ -132,8 +143,8 @@ The proposed model has no decoder vector, so interventions are explicitly sample
 
 ```bash
 lejepa-intervene \
-  --config runs/the-pile/pythia-6.9b-layer16/proposed/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed/checkpoint-00010000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16/proposed-axis512/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed-axis512/checkpoint-00010000.pt \
   --token-index 42 \
   --feature-index 123 \
   --alpha 5 \

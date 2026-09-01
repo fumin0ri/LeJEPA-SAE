@@ -81,6 +81,7 @@ def test_evaluation_metrics_and_report_artifacts(
         ),
         train=TrainConfig(device="cpu", precision="float32", batch_size=2),
     )
+    config.loss.axis_projections = 4
     config.validate()
     checkpoint = tmp_path / f"{model_type}.pt"
     torch.save({"model": build_model(config).state_dict()}, checkpoint)

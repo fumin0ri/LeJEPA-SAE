@@ -17,6 +17,8 @@ loss:
   invariance_weight: 25.0
   lambda_rdm: 125.0
   rdm_projections: 8192
+  axis_projections: 512
+  axis_weight: 1.0
   target_distribution: rectified_lp_distribution
   lp_norm_parameter: 1.0
   mean_shift_value: 0.0
@@ -40,5 +42,5 @@ train:
   eval_every: 1000
   checkpoint_every: 10000
   eval_batches: 12
-  output_dir: runs/the-pile/pythia-6.9b-layer16/proposed
+  output_dir: runs/the-pile/pythia-6.9b-layer16/proposed-axis512
   resume_from: null

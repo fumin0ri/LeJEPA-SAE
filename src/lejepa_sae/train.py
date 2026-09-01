@@ -24,7 +24,11 @@ from .data import (
     ShardAwareRandomSampler,
     validate_document_disjointness,
 )
-from .losses import l1_sparsity_metric, rectified_lp_rdm_regularization
+from .losses import (
+    l1_sparsity_metric,
+    random_axis_indices,
+    rectified_lp_rdm_regularization,
+)
 from .models import build_model
 from .views import sample_dimension_masks
 
@@ -79,6 +83,7 @@ def compute_loss(
     residuals: torch.Tensor,
     config: ExperimentConfig,
     include_diagnostics: bool = True,
+    axis_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     model_type = config.model.type
     if residuals.shape[1] != 1:
@@ -133,21 +138,33 @@ def compute_loss(
         local_features,
         global_features.unsqueeze(0).expand_as(local_features),
     )
-    distribution, view_distribution_losses = rectified_lp_rdm_regularization(
+    rdm = rectified_lp_rdm_regularization(
         feature_views,
         config.loss.rdm_projections,
+        config.loss.axis_projections,
+        config.loss.axis_weight,
         config.loss.lp_norm_parameter,
         config.loss.mean_shift_value,
+        axis_indices=axis_indices,
     )
-    loss = config.loss.invariance_weight * invariance + config.loss.lambda_rdm * distribution
+    loss = config.loss.invariance_weight * invariance + config.loss.lambda_rdm * rdm.loss
     if not torch.isfinite(loss):
         raise FloatingPointError("proposed model produced a non-finite loss")
+    view_distribution_losses = (
+        rdm.random_view_losses + config.loss.axis_weight * rdm.axis_view_losses
+    )
     metrics = {
         "loss": loss.detach(),
         "invariance": invariance.detach(),
-        "distribution": distribution.detach(),
+        "distribution": rdm.loss.detach(),
+        "random_distribution": rdm.random_loss.detach(),
+        "axis_distribution": rdm.axis_loss.detach(),
         "global_distribution": view_distribution_losses[0].detach(),
-        "local_distribution": torch.stack(view_distribution_losses[1:]).mean().detach(),
+        "local_distribution": view_distribution_losses[1:].mean().detach(),
+        "global_random_distribution": rdm.random_view_losses[0].detach(),
+        "local_random_distribution": rdm.random_view_losses[1:].mean().detach(),
+        "global_axis_distribution": rdm.axis_view_losses[0].detach(),
+        "local_axis_distribution": rdm.axis_view_losses[1:].mean().detach(),
     }
     if not include_diagnostics:
         return loss, metrics
@@ -331,6 +348,13 @@ def train(config: ExperimentConfig) -> Path:
     last_checkpoint: Path | None = None
 
     for step in range(start_step + 1, config.train.max_steps + 1):
+        step_axis_indices = None
+        if config.model.type == "proposed":
+            step_axis_indices = random_axis_indices(
+                config.loss.axis_projections,
+                config.model.feature_dim,
+                device=torch.device(config.train.device),
+            )
         for accumulation_index in range(config.train.gradient_accumulation_steps):
             try:
                 batch = next(data_iterator)
@@ -348,6 +372,7 @@ def train(config: ExperimentConfig) -> Path:
                     residuals,
                     config,
                     include_diagnostics=include_diagnostics,
+                    axis_indices=step_axis_indices,
                 )
                 scaled_loss = loss / config.train.gradient_accumulation_steps
             scaled_loss.backward()
