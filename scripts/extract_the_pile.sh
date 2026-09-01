@@ -4,7 +4,9 @@ set -euo pipefail
 # 100M width-4096 bf16 activations require about 763 GiB before filesystem
 # overhead. Source tokens are consumed once and the final document is truncated
 # so the configured budget is not exceeded.
-data_files="${DATA_FILES:-/datasets/the-pile/train/*.jsonl.zst}"
+# The first raw Pile train shard contains far more than the 100M-token default
+# budget, so stream only that shard unless a local path/glob is supplied.
+data_files="${DATA_FILES:-https://mystic.the-eye.eu/public/AI/pile/train/00.jsonl.zst}"
 max_source_tokens="${MAX_SOURCE_TOKENS:-100000000}"
 output_dir="${OUTPUT_DIR:-data/the-pile/pythia-6.9b/layer-16-ctx1024-100m}"
 

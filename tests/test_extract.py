@@ -5,6 +5,7 @@ import torch
 
 from lejepa_sae.extract import (
     _document_identifier,
+    _require_nonempty_dataset,
     _resolve_data_files,
     _truncate_to_source_token_budget,
     parse_args,
@@ -60,3 +61,15 @@ def test_missing_local_data_file_glob_fails_clearly(tmp_path):
 def test_remote_data_file_pattern_is_left_for_datasets_to_resolve():
     url = "https://example.test/train-*.jsonl.zst"
     assert _resolve_data_files([url]) == [url]
+
+
+def test_nonempty_dataset_peek_preserves_the_first_record():
+    assert list(_require_nonempty_dataset([{"text": "first"}, {"text": "second"}])) == [
+        {"text": "first"},
+        {"text": "second"},
+    ]
+
+
+def test_empty_dataset_fails_before_model_loading():
+    with pytest.raises(RuntimeError, match="source dataset is empty"):
+        _require_nonempty_dataset([])

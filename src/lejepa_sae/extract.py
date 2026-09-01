@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
+import itertools
 import json
 import time
 from collections import defaultdict
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -146,6 +148,19 @@ def _resolve_data_files(data_files: list[str] | None) -> list[str] | None:
     return resolved
 
 
+def _require_nonempty_dataset(
+    dataset: Iterable[dict[str, Any]],
+) -> Iterator[dict[str, Any]]:
+    iterator = iter(dataset)
+    try:
+        first = next(iterator)
+    except StopIteration as error:
+        raise RuntimeError(
+            "The source dataset is empty; check --data-files and --source-split"
+        ) from error
+    return itertools.chain((first,), iterator)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract split-safe Pythia residual shards")
     parser.add_argument("--dataset", required=True, help="Hugging Face dataset name")
@@ -201,6 +216,16 @@ def extract(args: argparse.Namespace) -> Path:
     if resolved_data_files is not None:
         print(f"Resolved {len(resolved_data_files):,} input data files")
 
+    dataset = load_dataset(
+        args.dataset,
+        args.dataset_config,
+        data_files=resolved_data_files,
+        revision=args.dataset_revision,
+        split=args.source_split,
+        streaming=args.streaming,
+    )
+    dataset = _require_nonempty_dataset(dataset)
+
     dtype = getattr(torch, args.dtype)
     tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision)
     model = AutoModel.from_pretrained(
@@ -221,14 +246,6 @@ def extract(args: argparse.Namespace) -> Path:
         captured.append(hidden.detach())
 
     handle = layers[args.layer].register_forward_hook(hook)
-    dataset = load_dataset(
-        args.dataset,
-        args.dataset_config,
-        data_files=resolved_data_files,
-        revision=args.dataset_revision,
-        split=args.source_split,
-        streaming=args.streaming,
-    )
     writer = ShardWriter(output_dir, args.shard_tokens)
     counts: dict[str, int] = defaultdict(int)
     processed_documents = 0
