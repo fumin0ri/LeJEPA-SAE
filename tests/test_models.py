@@ -2,7 +2,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig
+from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, load_config
 from lejepa_sae.models import SharedWindowEncoder, build_model
 from lejepa_sae.train import compute_loss
 
@@ -68,6 +68,27 @@ def test_all_models_complete_backward_step(model_type):
     assert any(parameter.grad is not None for parameter in model.parameters())
 
 
+def test_single_token_jepa_reports_collapse_diagnostics():
+    config = tiny_config("single_token_jepa")
+    model = build_model(config)
+    residuals = torch.randn(8, 1, config.model.d_llm)
+    loss, metrics = compute_loss(model, residuals, config)
+    expected = {
+        "global_distribution",
+        "local_distribution",
+        "l0_sparsity",
+        "l1_sparsity",
+        "global_active_fraction",
+        "local_active_fraction",
+        "global_feature_std",
+        "local_feature_std",
+        "global_dead_feature_fraction",
+        "local_dead_feature_fraction",
+    }
+    assert expected <= metrics.keys()
+    assert torch.isfinite(loss)
+
+
 def test_positions_affect_encoding():
     config = tiny_config()
     model = build_model(config).eval()
@@ -126,3 +147,38 @@ def test_dimension_keep_fraction_is_validated(keep_fraction):
     config.model.dimension_keep_fraction = keep_fraction
     with pytest.raises(ValueError, match="dimension_keep_fraction"):
         config.validate()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("rdm_projections", 0, "rdm_projections"),
+        ("lp_norm_parameter", 0.0, "lp_norm_parameter"),
+        ("target_distribution", "rectified_gaussian", "target_distribution"),
+        ("mode_of_sigma", "sigma_RGN", "mode_of_sigma"),
+        ("projection_vectors_type", "svd", "projection_vectors_type"),
+    ],
+)
+def test_single_token_paper_rdm_config_is_validated(field, value, message):
+    config = tiny_config("single_token_jepa")
+    setattr(config.loss, field, value)
+    with pytest.raises(ValueError, match=message):
+        config.validate()
+
+
+def test_single_token_preset_uses_paper_stabilization_defaults():
+    config = load_config("configs/pythia-6.9b-layer16-single-token.yaml")
+    assert config.model.type == "single_token_jepa"
+    assert config.data.window_size == 1
+    assert config.model.num_local_views == 4
+    assert config.loss.target_distribution == "rectified_lp_distribution"
+    assert config.loss.lp_norm_parameter == 1.0
+    assert config.loss.mean_shift_value == 0.0
+    assert config.loss.mode_of_sigma == "sigma_GN"
+    assert config.loss.projection_vectors_type == "random"
+    assert config.loss.rdm_projections == 8192
+    assert config.loss.invariance_weight == 25.0
+    assert config.loss.lambda_rdm == 125.0
+    assert config.train.batch_size == 128
+    assert config.train.gradient_accumulation_steps == 4
+    assert config.train.resume_from is None

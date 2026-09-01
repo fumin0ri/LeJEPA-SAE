@@ -53,6 +53,11 @@ class LossConfig:
     rdm_projections: int = 32
     target_active_fraction: float = 0.10
     target_sigma: float = 1.0
+    target_distribution: str = "rectified_lp_distribution"
+    lp_norm_parameter: float = 1.0
+    mean_shift_value: float = 0.0
+    mode_of_sigma: str = "sigma_GN"
+    projection_vectors_type: str = "random"
     invariance_weight: float = 1.0
     reconstruction_weight: float = 1.0
     sae_l1_coefficient: float = 1e-3
@@ -106,6 +111,22 @@ class ExperimentConfig:
             raise ValueError("dimension-view models require data.window_size=1")
         if not 0.0 < self.loss.target_active_fraction < 1.0:
             raise ValueError("loss.target_active_fraction must be in (0, 1)")
+        if self.loss.rdm_projections < 1:
+            raise ValueError("loss.rdm_projections must be positive")
+        if self.model.type == "single_token_jepa":
+            if self.loss.target_distribution != "rectified_lp_distribution":
+                raise ValueError(
+                    "single_token_jepa requires loss.target_distribution="
+                    "rectified_lp_distribution"
+                )
+            if self.loss.lp_norm_parameter <= 0:
+                raise ValueError("loss.lp_norm_parameter must be positive")
+            if self.loss.mode_of_sigma != "sigma_GN":
+                raise ValueError("single_token_jepa currently supports loss.mode_of_sigma=sigma_GN")
+            if self.loss.projection_vectors_type != "random":
+                raise ValueError(
+                    "single_token_jepa currently supports loss.projection_vectors_type=random"
+                )
         if self.train.gradient_accumulation_steps < 1:
             raise ValueError("train.gradient_accumulation_steps must be positive")
         if self.model.type == "sparse_jepa_full_view":

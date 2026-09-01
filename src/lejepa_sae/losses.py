@@ -48,6 +48,81 @@ def sample_rectified_gaussian_like(
     return (noise * scale + mu).relu()
 
 
+def generalized_gaussian_unit_variance_sigma(lp_norm_parameter: float) -> float:
+    """Scale for unit pre-rectification variance under the paper's GN_p convention."""
+    if lp_norm_parameter <= 0:
+        raise ValueError("lp_norm_parameter must be positive")
+    p = lp_norm_parameter
+    log_sigma = 0.5 * (math.lgamma(1.0 / p) - math.lgamma(3.0 / p))
+    log_sigma = log_sigma - math.log(p) / p
+    return math.exp(log_sigma)
+
+
+def sample_rectified_generalized_gaussian_like(
+    values: torch.Tensor,
+    lp_norm_parameter: float,
+    mean_shift_value: float = 0.0,
+    sigma: float | None = None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Sample ReLU(GN_p(mu, sigma)) with the Rectified LpJEPA parameterization."""
+    if lp_norm_parameter <= 0:
+        raise ValueError("lp_norm_parameter must be positive")
+    if sigma is None:
+        sigma = generalized_gaussian_unit_variance_sigma(lp_norm_parameter)
+    if sigma <= 0:
+        raise ValueError("sigma must be positive")
+
+    sample_dtype = (
+        torch.float32 if values.dtype in {torch.float16, torch.bfloat16} else values.dtype
+    )
+    shape = values.shape
+    device = values.device
+    p = lp_norm_parameter
+
+    if p == 1.0:
+        uniform = torch.rand(shape, device=device, dtype=sample_dtype, generator=generator)
+        epsilon = torch.finfo(sample_dtype).eps
+        uniform = uniform.clamp(min=epsilon, max=1.0 - epsilon) - 0.5
+        noise = -uniform.sign() * torch.log1p(-2.0 * uniform.abs())
+    elif p == 2.0:
+        noise = torch.randn(shape, device=device, dtype=sample_dtype, generator=generator)
+    else:
+        concentration = torch.full(shape, 1.0 / p, device=device, dtype=sample_dtype)
+        gamma = torch._standard_gamma(concentration, generator=generator)
+        signs = torch.empty(shape, device=device, dtype=sample_dtype).bernoulli_(
+            0.5, generator=generator
+        )
+        noise = (2.0 * signs - 1.0) * (p * gamma).pow(1.0 / p)
+
+    samples = (mean_shift_value + sigma * noise).relu()
+    return samples.to(dtype=values.dtype)
+
+
+def random_unit_projections(
+    num_projections: int,
+    feature_dim: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Draw row-wise unit vectors, normalizing in float32 before mixed-precision use."""
+    if num_projections < 1:
+        raise ValueError("num_projections must be positive")
+    if feature_dim < 1:
+        raise ValueError("feature_dim must be positive")
+    projections = torch.randn(
+        num_projections,
+        feature_dim,
+        device=device,
+        dtype=torch.float32,
+        generator=generator,
+    )
+    projections = F.normalize(projections, dim=1)
+    return projections.to(dtype=dtype)
+
+
 def sliced_wasserstein_2(
     values: torch.Tensor,
     targets: torch.Tensor,
@@ -71,6 +146,79 @@ def sliced_wasserstein_2(
     projected_values = (values @ directions).sort(dim=0).values
     projected_targets = (targets @ directions).sort(dim=0).values
     return F.mse_loss(projected_values, projected_targets)
+
+
+def sliced_wasserstein_2_with_projections(
+    values: torch.Tensor,
+    targets: torch.Tensor,
+    projection_vectors: torch.Tensor,
+) -> torch.Tensor:
+    """Empirical sliced W2 for explicit shared projection rows [projections, features]."""
+    if values.shape != targets.shape or values.ndim != 2:
+        raise ValueError("values and targets must have the same [batch, features] shape")
+    if projection_vectors.ndim != 2 or projection_vectors.shape[1] != values.shape[1]:
+        raise ValueError("projection_vectors must have shape [projections, features]")
+
+    projected_values = (values @ projection_vectors.T).sort(dim=0).values
+    with torch.no_grad():
+        projected_targets = (targets @ projection_vectors.T).sort(dim=0).values
+    difference = projected_values.float() - projected_targets.float()
+    return difference.square().mean()
+
+
+def rectified_lp_rdm_regularization(
+    feature_views: list[torch.Tensor],
+    num_projections: int,
+    lp_norm_parameter: float,
+    mean_shift_value: float,
+    generator: torch.Generator | None = None,
+    projection_vectors: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Paper-aligned multi-view RDMReg with shared directions and independent RGG targets."""
+    if not feature_views:
+        raise ValueError("At least one feature view is required")
+    reference = feature_views[0]
+    if reference.ndim != 2:
+        raise ValueError("feature views must have shape [batch, features]")
+    if any(view.shape != reference.shape for view in feature_views):
+        raise ValueError("all feature views must have the same shape")
+
+    if projection_vectors is None:
+        projection_vectors = random_unit_projections(
+            num_projections,
+            reference.shape[1],
+            device=reference.device,
+            dtype=reference.dtype,
+            generator=generator,
+        )
+    elif projection_vectors.shape != (num_projections, reference.shape[1]):
+        raise ValueError("projection_vectors shape does not match num_projections/features")
+    projection_vectors = projection_vectors.to(device=reference.device, dtype=reference.dtype)
+
+    sigma = generalized_gaussian_unit_variance_sigma(lp_norm_parameter)
+    view_losses = []
+    for features in feature_views:
+        target = sample_rectified_generalized_gaussian_like(
+            features,
+            lp_norm_parameter,
+            mean_shift_value,
+            sigma,
+            generator,
+        )
+        view_losses.append(
+            sliced_wasserstein_2_with_projections(features, target, projection_vectors)
+        )
+    return torch.stack(view_losses).mean(), view_losses
+
+
+@torch.no_grad()
+def l1_sparsity_metric(features: torch.Tensor, epsilon: float = 1e-12) -> torch.Tensor:
+    """Paper metric: mean (||z||_1 / ||z||_2)^2 / D over samples."""
+    width = features.shape[1]
+    work = features.float()
+    l1_norm = torch.linalg.vector_norm(work, ord=1, dim=1)
+    l2_norm = torch.linalg.vector_norm(work, ord=2, dim=1)
+    return ((l1_norm / (l2_norm + epsilon)).square() / width).mean()
 
 
 def rdm_regularization(

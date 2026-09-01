@@ -148,16 +148,42 @@ The window autoencoder uses the same small Transformer encoder and a capacity-co
 factorized Transformer decoder, avoiding a confounding 335M-parameter dense 8192→(10×4096)
 decoder.
 
-### Single-token dimension-mask comparison
+### Single-token dimension-mask JEPA stabilization
 
-This controlled experiment uses one residual vector at a time and gives the JEPA model exactly
-the same `4096→8192→ReLU` sparse encoder as the standard SAE. Four local views each retain an
-independently sampled, exact half of the residual coordinates. Masking happens after subtraction
-of the learned pre-bias, so a missing raw coordinate is filled with that pre-bias rather than an
-out-of-distribution raw zero. Retained centered values use inverted-mask scaling (`1/q`, or 2× at
-the default `q=0.5`). No Transformer, CLS token, or decoder is present in `single_token_jepa`.
+This experiment uses one residual vector at a time and gives the JEPA model a
+`4096→8192→ReLU` sparse encoder. Four local views each retain an independently sampled, exact
+half of the residual coordinates. Masking happens after subtraction of the learned pre-bias, so a
+missing raw coordinate is filled with that pre-bias rather than an out-of-distribution raw zero.
+Retained centered values use inverted-mask scaling (`1/q`, or 2× at the default `q=0.5`). No
+Transformer, CLS token, decoder, or stop-gradient is present in `single_token_jepa`.
 
-Run the three-way controlled comparison:
+First establish a healthy single-token JEPA run by itself:
+
+```bash
+bash scripts/run_single_token_jepa.sh
+```
+
+The stabilization preset follows Rectified LpJEPA: it matches every view to
+`ReLU(Laplace(0, 1/sqrt(2)))`, shares 8192 random unit projections across the complete global
+view and four masked local views, and independently samples the target for each view. The
+invariance and RDMReg weights are 25 and 125. RDMReg sorts projected samples along the true
+microbatch dimension, so the preset uses a microbatch of 128; gradient accumulation does not
+increase the sample count of this distribution estimate.
+
+Training logs separate `global_distribution` and `local_distribution`, and include global/local
+active fractions, feature standard deviations, batch dead-feature fractions, and the paper's L0
+and L1 sparsity metrics. Start this run from a fresh initialization instead of resuming a collapsed
+checkpoint. For a quick plumbing-only smoke test, override the projection count and step count:
+
+```bash
+lejepa-train \
+  --config configs/pythia-6.9b-layer16-single-token.yaml \
+  --set loss.rdm_projections=512 \
+  --set train.max_steps=100 \
+  --set train.output_dir=runs/the-pile/pythia-6.9b-layer16/single-token/smoke-p512
+```
+
+After the JEPA run is demonstrably healthy, the three-way controlled comparison remains available:
 
 ```bash
 bash scripts/run_single_token_comparison.sh
@@ -178,11 +204,11 @@ Evaluate any run with its resolved config and checkpoint, for example:
 
 ```bash
 lejepa-evaluate \
-  --config runs/the-pile/pythia-6.9b-layer16/single-token/single_token_jepa/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16/single-token/single_token_jepa/checkpoint-00100000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16/single-token/paper-rdmreg-p1-mu0/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16/single-token/paper-rdmreg-p1-mu0/checkpoint-00100000.pt \
   --max-windows 10000 \
   --top-k 20 \
-  --output-dir runs/the-pile/pythia-6.9b-layer16/single-token/single_token_jepa/evaluation
+  --output-dir runs/the-pile/pythia-6.9b-layer16/single-token/paper-rdmreg-p1-mu0/evaluation
 ```
 
 All models report active fraction, dead features, feature variance, and top activating tokens.

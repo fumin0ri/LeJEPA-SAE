@@ -22,11 +22,17 @@ model:
   sparse_bias: 0.0
 
 loss:
-  invariance_weight: 1.0
-  lambda_rdm: 1.0
-  rdm_projections: 32
+  invariance_weight: 25.0
+  lambda_rdm: 125.0
+  rdm_projections: 8192
+  # Legacy 10-token Gaussian-target settings; ignored by single_token_jepa.
   target_active_fraction: 0.10
   target_sigma: 1.0
+  target_distribution: rectified_lp_distribution
+  lp_norm_parameter: 1.0
+  mean_shift_value: 0.0
+  mode_of_sigma: sigma_GN
+  projection_vectors_type: random
   reconstruction_weight: 1.0
   sae_l1_coefficient: 0.001
 
@@ -34,8 +40,8 @@ train:
   seed: 42
   device: cuda
   precision: bfloat16
-  batch_size: 64
-  gradient_accumulation_steps: 8
+  batch_size: 128
+  gradient_accumulation_steps: 4
   max_steps: 100000
   learning_rate: 0.0001
   weight_decay: 0.01
@@ -45,5 +51,5 @@ train:
   eval_every: 1000
   checkpoint_every: 5000
   eval_batches: 50
-  output_dir: runs/the-pile/pythia-6.9b-layer16/single-token/single-token-jepa-q50
+  output_dir: runs/the-pile/pythia-6.9b-layer16/single-token/paper-rdmreg-p1-mu0
   resume_from: null

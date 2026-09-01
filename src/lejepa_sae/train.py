@@ -27,7 +27,9 @@ from .data import (
 from .losses import (
     gaussian_distribution_regularization,
     invariance_loss,
+    l1_sparsity_metric,
     rdm_regularization,
+    rectified_lp_rdm_regularization,
 )
 from .models import build_model
 from .views import full_view, sample_dimension_masks, sample_local_views
@@ -106,28 +108,43 @@ def compute_loss(
         ]
         invariance = invariance_loss(global_features, local_features)
         all_features = [global_features, *local_features]
-        distribution = torch.stack(
-            [
-                rdm_regularization(
-                    features,
-                    config.loss.rdm_projections,
-                    config.loss.target_active_fraction,
-                    config.loss.target_sigma,
-                )
-                for features in all_features
-            ]
-        ).mean()
+        distribution, view_distribution_losses = rectified_lp_rdm_regularization(
+            all_features,
+            config.loss.rdm_projections,
+            config.loss.lp_norm_parameter,
+            config.loss.mean_shift_value,
+        )
         loss = (
             config.loss.invariance_weight * invariance
             + config.loss.lambda_rdm * distribution
         )
-        flattened = torch.cat(all_features, dim=0)
+        if not torch.isfinite(loss):
+            raise FloatingPointError("single_token_jepa produced a non-finite loss")
+        flattened = torch.cat(all_features, dim=0).detach()
+        flattened_locals = torch.cat(local_features, dim=0).detach()
+        global_detached = global_features.detach()
+        global_float = global_detached.float()
+        local_float = flattened_locals.float()
         return loss, {
             "loss": loss.detach(),
             "invariance": invariance.detach(),
             "distribution": distribution.detach(),
+            "global_distribution": view_distribution_losses[0].detach(),
+            "local_distribution": torch.stack(view_distribution_losses[1:]).mean().detach(),
             "active_fraction": (flattened > 0).float().mean().detach(),
-            "feature_std": flattened.float().std(dim=0).mean().detach(),
+            "l0_sparsity": (flattened > 0).float().mean().detach(),
+            "l1_sparsity": l1_sparsity_metric(flattened).detach(),
+            "global_active_fraction": (global_detached > 0).float().mean(),
+            "local_active_fraction": (flattened_locals > 0).float().mean().detach(),
+            "feature_std": flattened.float().std(dim=0, unbiased=False).mean(),
+            "global_feature_std": global_float.std(dim=0, unbiased=False).mean(),
+            "local_feature_std": local_float.std(dim=0, unbiased=False).mean(),
+            "global_dead_feature_fraction": (
+                global_detached.amax(dim=0) <= 0
+            ).float().mean(),
+            "local_dead_feature_fraction": (
+                flattened_locals.amax(dim=0) <= 0
+            ).float().mean().detach(),
         }
 
     if model_type == "standard_sae":
