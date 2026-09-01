@@ -1,8 +1,10 @@
 import math
 
+import pytest
 import torch
 
 from lejepa_sae.losses import (
+    generalized_gaussian_mean_shift_for_active_fraction,
     generalized_gaussian_unit_variance_sigma,
     random_axis_indices,
     random_unit_projections,
@@ -45,6 +47,27 @@ def test_generalized_rectified_lp_sampler_supports_nonstandard_p():
     )
     assert torch.isfinite(target).all()
     assert (target >= 0).all()
+
+
+def test_mean_shift_matches_requested_l0_fraction_for_supported_lp_targets():
+    expected = 0.009765625
+    reference = torch.empty(500_000)
+    for p in (0.5, 1.0, 2.0):
+        mean_shift = generalized_gaussian_mean_shift_for_active_fraction(p, expected)
+        target = sample_rectified_generalized_gaussian_like(
+            reference,
+            p,
+            mean_shift,
+            generator=torch.Generator().manual_seed(31),
+        )
+        observed = float((target > 0).float().mean())
+        assert abs(observed - expected) < 0.001
+
+
+def test_mean_shift_active_fraction_validation():
+    for expected in (0.0, 1.0):
+        with pytest.raises(ValueError, match="expected_active_fraction"):
+            generalized_gaussian_mean_shift_for_active_fraction(1.0, expected)
 
 
 def test_random_projections_are_unit_norm():

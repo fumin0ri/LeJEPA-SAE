@@ -25,6 +25,7 @@ from .data import (
     validate_document_disjointness,
 )
 from .losses import (
+    generalized_gaussian_mean_shift_for_active_fraction,
     l1_sparsity_metric,
     random_axis_indices,
     rectified_lp_rdm_regularization,
@@ -144,7 +145,14 @@ def compute_loss(
         config.loss.axis_projections,
         config.loss.axis_weight,
         config.loss.lp_norm_parameter,
-        config.loss.mean_shift_value,
+        (
+            config.loss.mean_shift_value
+            if config.loss.expected_l0_fraction is None
+            else generalized_gaussian_mean_shift_for_active_fraction(
+                config.loss.lp_norm_parameter,
+                config.loss.expected_l0_fraction,
+            )
+        ),
         axis_indices=axis_indices,
     )
     loss = config.loss.invariance_weight * invariance + config.loss.lambda_rdm * rdm.loss
@@ -166,6 +174,11 @@ def compute_loss(
         "global_axis_distribution": rdm.axis_view_losses[0].detach(),
         "local_axis_distribution": rdm.axis_view_losses[1:].mean().detach(),
     }
+    if config.loss.expected_l0_fraction is not None:
+        metrics["expected_l0_fraction"] = torch.tensor(
+            config.loss.expected_l0_fraction,
+            device=feature_views.device,
+        )
     if not include_diagnostics:
         return loss, metrics
 

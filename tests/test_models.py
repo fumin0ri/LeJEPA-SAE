@@ -64,6 +64,7 @@ def test_proposed_reports_collapse_diagnostics():
         "local_feature_std",
         "global_dead_feature_fraction",
         "local_dead_feature_fraction",
+        "expected_l0_fraction",
     }
     assert expected <= metrics.keys()
     assert torch.isfinite(loss)
@@ -87,6 +88,7 @@ def test_proposed_can_skip_expensive_diagnostics():
         "local_random_distribution",
         "global_axis_distribution",
         "local_axis_distribution",
+        "expected_l0_fraction",
     } == metrics.keys()
     assert "feature_std" not in metrics
 
@@ -187,6 +189,8 @@ def test_dimension_keep_fraction_is_validated(keep_fraction):
         ("axis_projections", 17, "axis_projections"),
         ("axis_weight", 0.0, "axis_weight"),
         ("lp_norm_parameter", 0.0, "lp_norm_parameter"),
+        ("expected_l0_fraction", 0.0, "expected_l0_fraction"),
+        ("expected_l0_fraction", 1.0, "expected_l0_fraction"),
         ("target_distribution", "rectified_gaussian", "target_distribution"),
         ("mode_of_sigma", "sigma_RGN", "mode_of_sigma"),
         ("projection_vectors_type", "svd", "projection_vectors_type"),
@@ -204,8 +208,10 @@ def test_main_preset_uses_single_token_paper_defaults():
     assert config.model.type == "proposed"
     assert config.data.window_size == 1
     assert config.model.num_local_views == 4
+    assert config.model.feature_dim == 16384
     assert config.loss.target_distribution == "rectified_lp_distribution"
     assert config.loss.lp_norm_parameter == 1.0
+    assert config.loss.expected_l0_fraction == 0.009765625
     assert config.loss.mean_shift_value == 0.0
     assert config.loss.mode_of_sigma == "sigma_GN"
     assert config.loss.projection_vectors_type == "random"
@@ -219,5 +225,7 @@ def test_main_preset_uses_single_token_paper_defaults():
     assert config.train.max_steps == 10000
     assert config.train.eval_batches == 12
     assert config.train.checkpoint_every == 10000
-    assert config.train.output_dir.endswith("/proposed-axis512")
+    assert config.train.output_dir.endswith(
+        "/proposed-d16384-l0-0.009765625-axis512"
+    )
     assert config.train.resume_from is None

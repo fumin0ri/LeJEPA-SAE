@@ -11,7 +11,7 @@ local views retains an independently sampled, exact half of its coordinates. The
 
 ```text
 h_t → subtract learned pre-bias → exact coordinate mask → inverted-mask scaling
-    → Linear(4096, 8192) → ReLU → z
+    → Linear(4096, 16384) → ReLU → z
 ```
 
 Missing coordinates are therefore filled with the learned pre-bias and become zero after
@@ -25,12 +25,17 @@ L = 25 · mean_v MSE(z_global, z_local_v)
   + 125 · (L_random-RDMReg + 1.0 · L_axis-RDMReg)
 ```
 
-RDMReg follows Rectified LpJEPA: every view is matched to an independent
-`ReLU(Laplace(0, 1/√2))` target with 8192 shared random unit projections. In addition, every
-optimizer step samples 512 coordinate axes without replacement and directly matches the selected
-feature marginals. Axis indices are shared by all five views, and the same view-specific target is
-used by both losses. Coordinate values are gathered directly; no one-hot matrix is materialized.
-Projection matmul is mixed precision; sorting and loss reduction are float32.
+RDMReg follows Rectified LpJEPA: every view is matched to an independent rectified generalized
+Gaussian target. The default is `ReLU(Laplace(-2.78299, 1/√2))`, whose expected nonzero fraction is
+`0.009765625`; at width 16384 this is 160 active features per sample in expectation. The mean shift
+is derived from `loss.expected_l0_fraction`, including for nonstandard `p`, rather than being tied
+to this default. Set it to `null` to use `loss.mean_shift_value` directly.
+
+The distribution loss uses 8192 shared random unit projections. In addition, every optimizer step
+samples 512 coordinate axes without replacement and directly matches the selected feature
+marginals. Axis indices are shared by all five views, and the same view-specific target is used by
+both losses. Coordinate values are gathered directly; no one-hot matrix is materialized. Projection
+matmul is mixed precision; sorting and loss reduction are float32.
 
 ## Environment
 
@@ -100,7 +105,8 @@ bash scripts/run_proposed.sh
 ```
 
 The pilot preset uses batch 512, no gradient accumulation, 10,000 steps, and a fresh output at
-`runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512`. The output is deliberately separate from
+`runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d16384-l0-0.009765625-axis512`.
+The output is deliberately separate from
 pre-axis checkpoints and starts from a fresh initialization. Do not resume a collapsed checkpoint:
 axis loss discourages feature death while gradients still cross ReLU, but cannot guarantee revival
 once every sample for a feature is in ReLU's negative region.
@@ -116,7 +122,12 @@ BATCH_SIZE=128 GRADIENT_ACCUMULATION_STEPS=4 bash scripts/run_proposed.sh
 batch—including separate `random_distribution` and `axis_distribution` values—collapse
 diagnostics at log steps, interval throughput, and CUDA peak memory. Axis ablations can use, for
 example, `AXIS_PROJECTIONS=256 AXIS_WEIGHT=2.0 bash scripts/run_proposed.sh`; the default output
-directory includes the selected axis count.
+directory includes the selected width, expected L0 fraction, and axis count. Width and target L0
+can be changed without editing the preset, for example:
+
+```bash
+FEATURE_DIM=32768 EXPECTED_L0_FRACTION=0.005 bash scripts/run_proposed.sh
+```
 
 The optional single-token reconstruction baselines remain available:
 
@@ -134,11 +145,11 @@ bash scripts/run_comparison.sh
 
 ```bash
 lejepa-evaluate \
-  --config runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/checkpoint-00010000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d16384-l0-0.009765625-axis512/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d16384-l0-0.009765625-axis512/checkpoint-00010000.pt \
   --max-tokens 10000 \
   --top-k 20 \
-  --output-dir runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/evaluation
+  --output-dir runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d16384-l0-0.009765625-axis512/evaluation
 ```
 
 Open `evaluation/index.html` first. Evaluation writes:
@@ -166,8 +177,8 @@ The proposed model has no decoder vector, so interventions are explicitly sample
 
 ```bash
 lejepa-intervene \
-  --config runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/checkpoint-00010000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d16384-l0-0.009765625-axis512/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d16384-l0-0.009765625-axis512/checkpoint-00010000.pt \
   --token-index 42 \
   --feature-index 123 \
   --alpha 5 \

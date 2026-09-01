@@ -86,3 +86,7 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
     assert all(record["optimizer_steps_per_second"] > 0 for record in train_records)
     if model_type == "proposed":
         assert all("feature_std" in record for record in train_records)
+        assert all(
+            record["expected_l0_fraction"] == pytest.approx(0.009765625)
+            for record in train_records
+        )

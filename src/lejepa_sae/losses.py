@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
+from statistics import NormalDist
 
 import torch
 import torch.nn.functional as F
@@ -24,6 +26,58 @@ def generalized_gaussian_unit_variance_sigma(lp_norm_parameter: float) -> float:
     log_sigma = 0.5 * (math.lgamma(1.0 / p) - math.lgamma(3.0 / p))
     log_sigma = log_sigma - math.log(p) / p
     return math.exp(log_sigma)
+
+
+@lru_cache(maxsize=128)
+def generalized_gaussian_mean_shift_for_active_fraction(
+    lp_norm_parameter: float,
+    expected_active_fraction: float,
+    sigma: float | None = None,
+) -> float:
+    """Return mu such that ReLU(mu + sigma * GN_p) has the requested L0 fraction."""
+    if lp_norm_parameter <= 0:
+        raise ValueError("lp_norm_parameter must be positive")
+    if not 0.0 < expected_active_fraction < 1.0:
+        raise ValueError("expected_active_fraction must be in (0, 1)")
+    if sigma is None:
+        sigma = generalized_gaussian_unit_variance_sigma(lp_norm_parameter)
+    if sigma <= 0:
+        raise ValueError("sigma must be positive")
+    if expected_active_fraction == 0.5:
+        return 0.0
+
+    p = lp_norm_parameter
+    if p == 1.0:
+        if expected_active_fraction < 0.5:
+            return sigma * math.log(2.0 * expected_active_fraction)
+        return -sigma * math.log(2.0 * (1.0 - expected_active_fraction))
+    if p == 2.0:
+        return sigma * NormalDist().inv_cdf(expected_active_fraction)
+
+    tail_probability = 2.0 * min(
+        expected_active_fraction, 1.0 - expected_active_fraction
+    )
+    target_cdf = min(1.0 - tail_probability, 1.0 - 1e-15)
+    shape = torch.tensor(1.0 / p, dtype=torch.float64)
+    target = torch.tensor(target_cdf, dtype=torch.float64)
+    lower, upper = 0.0, 1.0
+    while (
+        float(torch.special.gammainc(shape, torch.tensor(upper, dtype=torch.float64)))
+        < target_cdf
+    ):
+        upper *= 2.0
+    for _ in range(80):
+        midpoint = (lower + upper) / 2.0
+        cdf = torch.special.gammainc(
+            shape, torch.tensor(midpoint, dtype=torch.float64)
+        )
+        if bool(cdf < target):
+            lower = midpoint
+        else:
+            upper = midpoint
+    magnitude = (p * (lower + upper) / 2.0) ** (1.0 / p)
+    sign = -1.0 if expected_active_fraction < 0.5 else 1.0
+    return sign * sigma * magnitude
 
 
 def sample_rectified_generalized_gaussian_like(

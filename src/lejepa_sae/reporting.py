@@ -118,6 +118,7 @@ TRAINING_HISTORY_FIELDS = [
     "kind",
     "step",
     "active_fraction",
+    "expected_l0_fraction",
     "global_active_fraction",
     "local_active_fraction",
     "invariance",
@@ -211,6 +212,7 @@ def write_training_curves_svg(
             [
                 ("active_fraction", "train", "Train", "#4f46e5"),
                 ("active_fraction", "validation", "Validation", "#db2777"),
+                ("expected_l0_fraction", "train", "Target L0", "#64748b"),
                 ("global_active_fraction", "train", "Global", "#059669"),
                 ("local_active_fraction", "train", "Local", "#d97706"),
             ],
@@ -334,8 +336,8 @@ def write_training_curves_svg(
             )
             for x, y in valid:
                 pieces.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2.7" fill="{color}"/>')
-            legend_y = panel_y + 280
-            item_x = legend_x + series_index * 124
+            legend_y = panel_y + 272 + (series_index // 4) * 17
+            item_x = legend_x + (series_index % 4) * 124
             pieces.extend(
                 [
                     f'<line x1="{item_x}" y1="{legend_y - 4}" x2="{item_x + 18}" y2="{legend_y - 4}" stroke="{color}" stroke-width="2.5"{dash}/>',

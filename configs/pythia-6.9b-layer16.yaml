@@ -9,7 +9,7 @@ data:
 model:
   type: proposed
   d_llm: 4096
-  feature_dim: 8192
+  feature_dim: 16384
   num_local_views: 4
   dimension_keep_fraction: 0.5
 
@@ -21,6 +21,7 @@ loss:
   axis_weight: 1.0
   target_distribution: rectified_lp_distribution
   lp_norm_parameter: 1.0
+  expected_l0_fraction: 0.009765625
   mean_shift_value: 0.0
   mode_of_sigma: sigma_GN
   projection_vectors_type: random
@@ -42,5 +43,5 @@ train:
   eval_every: 1000
   checkpoint_every: 10000
   eval_batches: 12
-  output_dir: runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512
+  output_dir: runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d16384-l0-0.009765625-axis512
   resume_from: null

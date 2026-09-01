@@ -24,7 +24,7 @@ class DataConfig:
 class ModelConfig:
     type: ModelType = "proposed"
     d_llm: int = 4096
-    feature_dim: int = 8192
+    feature_dim: int = 16384
     num_local_views: int = 4
     dimension_keep_fraction: float = 0.5
 
@@ -37,6 +37,7 @@ class LossConfig:
     axis_weight: float = 1.0
     target_distribution: str = "rectified_lp_distribution"
     lp_norm_parameter: float = 1.0
+    expected_l0_fraction: float | None = 0.009765625
     mean_shift_value: float = 0.0
     mode_of_sigma: str = "sigma_GN"
     projection_vectors_type: str = "random"
@@ -96,6 +97,10 @@ class ExperimentConfig:
                 )
             if self.loss.lp_norm_parameter <= 0:
                 raise ValueError("loss.lp_norm_parameter must be positive")
+            if self.loss.expected_l0_fraction is not None and not (
+                0.0 < self.loss.expected_l0_fraction < 1.0
+            ):
+                raise ValueError("loss.expected_l0_fraction must be in (0, 1) or null")
             if self.loss.mode_of_sigma != "sigma_GN":
                 raise ValueError("proposed currently supports loss.mode_of_sigma=sigma_GN")
             if self.loss.projection_vectors_type != "random":
