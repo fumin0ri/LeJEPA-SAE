@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import time
@@ -128,6 +129,23 @@ def _truncate_to_source_token_budget(
     return token_ids[: max(remaining, 0)]
 
 
+def _resolve_data_files(data_files: list[str] | None) -> list[str] | None:
+    if data_files is None:
+        return None
+    resolved: list[str] = []
+    for value in data_files:
+        if "://" in value:
+            resolved.append(value)
+            continue
+        matches = sorted(glob.glob(value))
+        if not matches:
+            raise FileNotFoundError(f"No data files matched: {value}")
+        resolved.extend(str(Path(match).resolve()) for match in matches if Path(match).is_file())
+    if not resolved:
+        raise FileNotFoundError("No readable data files were resolved")
+    return resolved
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract split-safe Pythia residual shards")
     parser.add_argument("--dataset", required=True, help="Hugging Face dataset name")
@@ -179,13 +197,16 @@ def extract(args: argparse.Namespace) -> Path:
         raise ValueError("context-length must be at least window-size")
     if args.max_source_tokens is not None and args.max_source_tokens <= 0:
         raise ValueError("max-source-tokens must be positive")
+    resolved_data_files = _resolve_data_files(args.data_files)
+    if resolved_data_files is not None:
+        print(f"Resolved {len(resolved_data_files):,} input data files")
 
     dtype = getattr(torch, args.dtype)
     tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision)
     model = AutoModel.from_pretrained(
         args.model,
         revision=args.revision,
-        torch_dtype=dtype,
+        dtype=dtype,
         low_cpu_mem_usage=True,
     ).to(args.device)
     model.eval()
@@ -203,7 +224,7 @@ def extract(args: argparse.Namespace) -> Path:
     dataset = load_dataset(
         args.dataset,
         args.dataset_config,
-        data_files=args.data_files,
+        data_files=resolved_data_files,
         revision=args.dataset_revision,
         split=args.source_split,
         streaming=args.streaming,
@@ -285,6 +306,15 @@ def extract(args: argparse.Namespace) -> Path:
     finally:
         handle.remove()
 
+    if processed_documents == 0 or source_tokens_processed == 0:
+        raise RuntimeError(
+            "The dataset yielded no usable source documents or tokens; check --data-files, "
+            "--source-split, and --text-column"
+        )
+    if sum(counts.values()) == 0:
+        raise RuntimeError(
+            "No activations were produced; check --window-size and the source sequence lengths"
+        )
     shards = writer.finish()
     manifest = {
         "format_version": 1,
@@ -301,6 +331,7 @@ def extract(args: argparse.Namespace) -> Path:
         "dataset_config": args.dataset_config,
         "dataset_revision": args.dataset_revision,
         "data_files": args.data_files,
+        "resolved_data_files": resolved_data_files,
         "source_split": args.source_split,
         "input_format": "token_ids" if args.token_ids_column else "text",
         "text_column": None if args.token_ids_column else args.text_column,

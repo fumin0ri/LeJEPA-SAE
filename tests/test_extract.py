@@ -1,9 +1,11 @@
 import sys
 
+import pytest
 import torch
 
 from lejepa_sae.extract import (
     _document_identifier,
+    _resolve_data_files,
     _truncate_to_source_token_budget,
     parse_args,
 )
@@ -37,3 +39,24 @@ def test_extractor_defaults_to_1024_token_contexts(monkeypatch):
         ["lejepa-extract", "--dataset", "json", "--output-dir", "output"],
     )
     assert parse_args().context_length == 1024
+
+
+def test_local_data_file_globs_are_resolved_before_loading(tmp_path):
+    first = tmp_path / "00.jsonl.zst"
+    second = tmp_path / "01.jsonl.zst"
+    first.touch()
+    second.touch()
+    assert _resolve_data_files([str(tmp_path / "*.jsonl.zst")]) == [
+        str(first.resolve()),
+        str(second.resolve()),
+    ]
+
+
+def test_missing_local_data_file_glob_fails_clearly(tmp_path):
+    with pytest.raises(FileNotFoundError, match="No data files matched"):
+        _resolve_data_files([str(tmp_path / "*.jsonl.zst")])
+
+
+def test_remote_data_file_pattern_is_left_for_datasets_to_resolve():
+    url = "https://example.test/train-*.jsonl.zst"
+    assert _resolve_data_files([url]) == [url]
