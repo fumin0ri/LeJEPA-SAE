@@ -48,17 +48,18 @@ pip install -e '.[dev]'
 
 ## 1. Extract Pythia residual activations
 
-The default extraction streams the first official raw Pile training shard, sends each document to
-Pythia in chunks of up to 1024 tokens, and stops at 100M tokenized source tokens:
+The default extraction streams the Hugging Face-hosted `monology/pile-uncopyrighted-parquet`
+mirror, sends each document to Pythia in chunks of up to 1024 tokens, and stops at 100M tokenized
+source tokens:
 
 ```bash
 bash scripts/extract_the_pile.sh
 ```
 
-The default source is
-`https://mystic.the-eye.eu/public/AI/pile/train/00.jsonl.zst`; one shard is already much larger than
-the extraction budget. If the raw Pile is mounted locally, override it and the token budget without
-editing the script:
+This mirror removes Books3, BookCorpus2, OpenSubtitles, YTSubtitles, and OWT2 from The Pile; it is
+used by default because it streams through the same Hugging Face access path as the model and does
+not depend on The Eye. To use the exact standard Pile when it is mounted locally, override the
+dataset files and token budget without editing the script:
 
 ```bash
 DATA_FILES='/another/path/*.jsonl.zst' MAX_SOURCE_TOKENS=100000000 \
