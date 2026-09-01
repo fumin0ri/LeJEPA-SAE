@@ -63,10 +63,28 @@ def autocast_context(config: ExperimentConfig):
     return nullcontext()
 
 
+def stack_dimension_views(
+    token_residuals: torch.Tensor,
+    dimension_masks: list[torch.Tensor],
+    *,
+    include_global: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Broadcast residuals and stack masks so all dimension views use one Linear call."""
+    if not dimension_masks:
+        raise ValueError("At least one dimension mask is required")
+    masks = torch.stack(dimension_masks)
+    if include_global:
+        global_mask = torch.ones_like(token_residuals, dtype=torch.bool).unsqueeze(0)
+        masks = torch.cat((global_mask, masks), dim=0)
+    residual_views = token_residuals.unsqueeze(0).expand(masks.shape[0], -1, -1)
+    return residual_views, masks
+
+
 def compute_loss(
     model: nn.Module,
     residuals: torch.Tensor,
     config: ExperimentConfig,
+    include_diagnostics: bool = True,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     model_type = config.model.type
     complete = full_view(residuals)
@@ -82,19 +100,16 @@ def compute_loss(
         )
 
         if model_type == "dimension_denoising_sae":
-            outputs = [model(token_residuals, mask) for mask in dimension_masks]
-            reconstruction = torch.stack(
-                [
-                    F.mse_loss(output.reconstruction.float(), token_residuals.float())
-                    for output in outputs
-                ]
-            ).mean()
-            sparsity = torch.stack(
-                [output.features.float().abs().mean() for output in outputs]
-            ).mean()
+            residual_views, masks = stack_dimension_views(
+                token_residuals, dimension_masks, include_global=False
+            )
+            output = model(residual_views, masks)
+            target = token_residuals.unsqueeze(0).expand_as(output.reconstruction)
+            reconstruction = F.mse_loss(output.reconstruction.float(), target.float())
+            sparsity = output.features.float().abs().mean()
             loss = config.loss.reconstruction_weight * reconstruction
             loss = loss + config.loss.sae_l1_coefficient * sparsity
-            flattened = torch.cat([output.features for output in outputs], dim=0)
+            flattened = output.features.flatten(0, 1)
             return loss, {
                 "loss": loss.detach(),
                 "reconstruction": reconstruction.detach(),
@@ -102,14 +117,18 @@ def compute_loss(
                 "active_fraction": (flattened > 0).float().mean().detach(),
             }
 
-        global_features = model(token_residuals).features
-        local_features = [
-            model(token_residuals, mask).features for mask in dimension_masks
-        ]
-        invariance = invariance_loss(global_features, local_features)
-        all_features = [global_features, *local_features]
+        residual_views, masks = stack_dimension_views(
+            token_residuals, dimension_masks, include_global=True
+        )
+        feature_views = model(residual_views, masks).features
+        global_features = feature_views[0]
+        local_features = feature_views[1:]
+        invariance = F.mse_loss(
+            local_features,
+            global_features.unsqueeze(0).expand_as(local_features),
+        )
         distribution, view_distribution_losses = rectified_lp_rdm_regularization(
-            all_features,
+            feature_views,
             config.loss.rdm_projections,
             config.loss.lp_norm_parameter,
             config.loss.mean_shift_value,
@@ -120,32 +139,40 @@ def compute_loss(
         )
         if not torch.isfinite(loss):
             raise FloatingPointError("single_token_jepa produced a non-finite loss")
-        flattened = torch.cat(all_features, dim=0).detach()
-        flattened_locals = torch.cat(local_features, dim=0).detach()
-        global_detached = global_features.detach()
-        global_float = global_detached.float()
-        local_float = flattened_locals.float()
-        return loss, {
+        metrics = {
             "loss": loss.detach(),
             "invariance": invariance.detach(),
             "distribution": distribution.detach(),
             "global_distribution": view_distribution_losses[0].detach(),
             "local_distribution": torch.stack(view_distribution_losses[1:]).mean().detach(),
-            "active_fraction": (flattened > 0).float().mean().detach(),
-            "l0_sparsity": (flattened > 0).float().mean().detach(),
-            "l1_sparsity": l1_sparsity_metric(flattened).detach(),
-            "global_active_fraction": (global_detached > 0).float().mean(),
-            "local_active_fraction": (flattened_locals > 0).float().mean().detach(),
-            "feature_std": flattened.float().std(dim=0, unbiased=False).mean(),
-            "global_feature_std": global_float.std(dim=0, unbiased=False).mean(),
-            "local_feature_std": local_float.std(dim=0, unbiased=False).mean(),
-            "global_dead_feature_fraction": (
-                global_detached.amax(dim=0) <= 0
-            ).float().mean(),
-            "local_dead_feature_fraction": (
-                flattened_locals.amax(dim=0) <= 0
-            ).float().mean().detach(),
         }
+        if not include_diagnostics:
+            return loss, metrics
+
+        flattened = feature_views.flatten(0, 1).detach()
+        flattened_locals = local_features.flatten(0, 1).detach()
+        global_detached = global_features.detach()
+        global_float = global_detached.float()
+        local_float = flattened_locals.float()
+        metrics.update(
+            {
+                "active_fraction": (flattened > 0).float().mean().detach(),
+                "l0_sparsity": (flattened > 0).float().mean().detach(),
+                "l1_sparsity": l1_sparsity_metric(flattened).detach(),
+                "global_active_fraction": (global_detached > 0).float().mean(),
+                "local_active_fraction": (flattened_locals > 0).float().mean().detach(),
+                "feature_std": flattened.float().std(dim=0, unbiased=False).mean(),
+                "global_feature_std": global_float.std(dim=0, unbiased=False).mean(),
+                "local_feature_std": local_float.std(dim=0, unbiased=False).mean(),
+                "global_dead_feature_fraction": (
+                    global_detached.amax(dim=0) <= 0
+                ).float().mean(),
+                "local_dead_feature_fraction": (
+                    flattened_locals.amax(dim=0) <= 0
+                ).float().mean().detach(),
+            }
+        )
+        return loss, metrics
 
     if model_type == "standard_sae":
         batch_indices = torch.arange(residuals.shape[0], device=residuals.device)
@@ -229,6 +256,7 @@ def make_loader(
         config.data.window_size,
         stride,
         config.data.cache_shards_per_worker,
+        include_metadata=False,
     )
     if not len(dataset):
         raise ValueError(f"No {split} windows found in {config.data.activation_dir}")
@@ -245,10 +273,12 @@ def make_loader(
 
 
 def aggregate_metrics(metrics: list[dict[str, torch.Tensor]]) -> dict[str, float]:
-    keys = metrics[0].keys()
+    keys = set().union(*(item.keys() for item in metrics))
     return {
-        key: float(torch.stack([item[key].float().cpu() for item in metrics]).mean())
-        for key in keys
+        key: float(
+            torch.stack([item[key].float().cpu() for item in metrics if key in item]).mean()
+        )
+        for key in sorted(keys)
     }
 
 
@@ -353,53 +383,117 @@ def train(config: ExperimentConfig) -> Path:
     data_iterator = iter(train_loader)
     interval_metrics: list[dict[str, torch.Tensor]] = []
     started = time.monotonic()
+    last_log_time = started
+    excluded_interval_seconds = 0.0
+    interval_samples = 0
+    interval_steps = 0
+    cuda_device = (
+        torch.device(config.train.device) if config.train.device.startswith("cuda") else None
+    )
+    deferred_peak_allocated = 0
+    deferred_peak_reserved = 0
+    if cuda_device is not None:
+        torch.cuda.reset_peak_memory_stats(cuda_device)
     last_checkpoint: Path | None = None
 
     for step in range(start_step + 1, config.train.max_steps + 1):
-        for _ in range(config.train.gradient_accumulation_steps):
+        for accumulation_index in range(config.train.gradient_accumulation_steps):
             try:
                 batch = next(data_iterator)
             except StopIteration:
                 data_iterator = iter(train_loader)
                 batch = next(data_iterator)
             residuals = batch["residuals"].to(config.train.device, non_blocking=True)
+            include_diagnostics = (
+                step % config.train.log_every == 0
+                and accumulation_index == config.train.gradient_accumulation_steps - 1
+            )
             with autocast_context(config):
-                loss, metrics = compute_loss(model, residuals, config)
+                loss, metrics = compute_loss(
+                    model,
+                    residuals,
+                    config,
+                    include_diagnostics=include_diagnostics,
+                )
                 scaled_loss = loss / config.train.gradient_accumulation_steps
             scaled_loss.backward()
             interval_metrics.append(metrics)
+            interval_samples += residuals.shape[0]
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.max_grad_norm)
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
+        interval_steps += 1
 
         if step % config.train.log_every == 0:
+            aggregated = aggregate_metrics(interval_metrics)
+            logged_at = time.monotonic()
+            interval_seconds = max(
+                logged_at - last_log_time - excluded_interval_seconds,
+                1e-12,
+            )
             record = {
                 "kind": "train",
                 "step": step,
-                **aggregate_metrics(interval_metrics),
+                **aggregated,
                 "grad_norm": float(grad_norm),
                 "learning_rate": scheduler.get_last_lr()[0],
-                "elapsed_seconds": time.monotonic() - started,
+                "samples_per_second": interval_samples / interval_seconds,
+                "optimizer_steps_per_second": interval_steps / interval_seconds,
+                "elapsed_seconds": logged_at - started,
             }
+            if cuda_device is not None:
+                peak_allocated = max(
+                    deferred_peak_allocated,
+                    torch.cuda.max_memory_allocated(cuda_device),
+                )
+                peak_reserved = max(
+                    deferred_peak_reserved,
+                    torch.cuda.max_memory_reserved(cuda_device),
+                )
+                record["cuda_peak_allocated_mib"] = peak_allocated / 2**20
+                record["cuda_peak_reserved_mib"] = peak_reserved / 2**20
+                torch.cuda.reset_peak_memory_stats(cuda_device)
+                deferred_peak_allocated = 0
+                deferred_peak_reserved = 0
             with metrics_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record) + "\n")
             print(json.dumps(record), flush=True)
             interval_metrics.clear()
+            interval_samples = 0
+            interval_steps = 0
+            last_log_time = logged_at
+            excluded_interval_seconds = 0.0
 
         if step % config.train.eval_every == 0:
+            if cuda_device is not None:
+                deferred_peak_allocated = max(
+                    deferred_peak_allocated,
+                    torch.cuda.max_memory_allocated(cuda_device),
+                )
+                deferred_peak_reserved = max(
+                    deferred_peak_reserved,
+                    torch.cuda.max_memory_reserved(cuda_device),
+                )
+                torch.cuda.reset_peak_memory_stats(cuda_device)
+            evaluation_started = time.monotonic()
             record = {
                 "kind": "validation",
                 "step": step,
                 **evaluate_loss(model, validation_loader, config),
             }
+            excluded_interval_seconds += time.monotonic() - evaluation_started
+            if cuda_device is not None:
+                torch.cuda.reset_peak_memory_stats(cuda_device)
             with metrics_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record) + "\n")
             print(json.dumps(record), flush=True)
 
         if step % config.train.checkpoint_every == 0:
+            checkpoint_started = time.monotonic()
             last_checkpoint = save_checkpoint(output_dir, step, model, optimizer, scheduler, config)
+            excluded_interval_seconds += time.monotonic() - checkpoint_started
 
     checkpoint_step = int(last_checkpoint.stem.split("-")[-1]) if last_checkpoint else -1
     if checkpoint_step != config.train.max_steps:

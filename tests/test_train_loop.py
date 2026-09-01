@@ -89,4 +89,12 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, window_siz
     assert state["step"] == 2
     run_dir = tmp_path / f"run-{model_type}"
     assert (run_dir / "config.resolved.yaml").exists()
-    assert len((run_dir / "metrics.jsonl").read_text().splitlines()) == 4
+    records = [
+        json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()
+    ]
+    assert len(records) == 4
+    train_records = [record for record in records if record["kind"] == "train"]
+    assert all(record["samples_per_second"] > 0 for record in train_records)
+    assert all(record["optimizer_steps_per_second"] > 0 for record in train_records)
+    if model_type == "single_token_jepa":
+        assert all("feature_std" in record for record in train_records)

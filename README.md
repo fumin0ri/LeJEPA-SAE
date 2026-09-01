@@ -157,28 +157,46 @@ missing raw coordinate is filled with that pre-bias rather than an out-of-distri
 Retained centered values use inverted-mask scaling (`1/q`, or 2× at the default `q=0.5`). No
 Transformer, CLS token, decoder, or stop-gradient is present in `single_token_jepa`.
 
-First establish a healthy single-token JEPA run by itself:
+The stabilization preset follows Rectified LpJEPA: it matches every view to
+`ReLU(Laplace(0, 1/sqrt(2)))`, shares 8192 random unit projections across the complete global
+view and four masked local views, and independently samples the target for each view. The
+invariance and RDMReg weights are 25 and 125. The encoder processes all five views in one
+batched Linear call, and RDMReg projects all views in one operation while sorting each view only
+along its 512-sample batch dimension. The 10,000-step pilot therefore uses `512×1` instead of
+gradient accumulation, giving RDMReg a larger empirical distribution as well as reducing launch
+overhead.
+
+Training logs separate `global_distribution` and `local_distribution`, and include global/local
+active fractions, feature standard deviations, batch dead-feature fractions, and the paper's L0
+and L1 sparsity metrics. The expensive collapse diagnostics are computed at log steps and during
+validation, rather than every training batch. Train records also include interval
+`samples_per_second`, `optimizer_steps_per_second`, `cuda_peak_allocated_mib`, and
+`cuda_peak_reserved_mib`. Start this run from a fresh initialization instead of resuming a
+collapsed checkpoint.
+
+The default pilot command is:
 
 ```bash
 bash scripts/run_single_token_jepa.sh
 ```
 
-The stabilization preset follows Rectified LpJEPA: it matches every view to
-`ReLU(Laplace(0, 1/sqrt(2)))`, shares 8192 random unit projections across the complete global
-view and four masked local views, and independently samples the target for each view. The
-invariance and RDMReg weights are 25 and 125. RDMReg sorts projected samples along the true
-microbatch dimension, so the preset uses a microbatch of 128; gradient accumulation does not
-increase the sample count of this distribution estimate.
+If `512×1` is out of memory on the RTX 4090, keep the effective batch at 512 and use the formal
+fallbacks in this order:
 
-Training logs separate `global_distribution` and `local_distribution`, and include global/local
-active fractions, feature standard deviations, batch dead-feature fractions, and the paper's L0
-and L1 sparsity metrics. Start this run from a fresh initialization instead of resuming a collapsed
-checkpoint. For a quick plumbing-only smoke test, override the projection count and step count:
+```bash
+BATCH_SIZE=256 GRADIENT_ACCUMULATION_STEPS=2 bash scripts/run_single_token_jepa.sh
+BATCH_SIZE=128 GRADIENT_ACCUMULATION_STEPS=4 bash scripts/run_single_token_jepa.sh
+```
+
+The first positional argument can override the config path and the second the output directory.
+`MAX_STEPS` and `EVAL_BATCHES` are also available as environment overrides. For a quick
+plumbing-only smoke test, override the projection count and step count directly:
 
 ```bash
 lejepa-train \
   --config configs/pythia-6.9b-layer16-single-token.yaml \
   --set loss.rdm_projections=512 \
+  --set train.batch_size=32 \
   --set train.max_steps=100 \
   --set train.output_dir=runs/the-pile/pythia-6.9b-layer16/single-token/smoke-p512
 ```
@@ -204,11 +222,11 @@ Evaluate any run with its resolved config and checkpoint, for example:
 
 ```bash
 lejepa-evaluate \
-  --config runs/the-pile/pythia-6.9b-layer16/single-token/paper-rdmreg-p1-mu0/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16/single-token/paper-rdmreg-p1-mu0/checkpoint-00100000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16/single-token/pilot-paper-rdmreg-p1-mu0-b512/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16/single-token/pilot-paper-rdmreg-p1-mu0-b512/checkpoint-00010000.pt \
   --max-windows 10000 \
   --top-k 20 \
-  --output-dir runs/the-pile/pythia-6.9b-layer16/single-token/paper-rdmreg-p1-mu0/evaluation
+  --output-dir runs/the-pile/pythia-6.9b-layer16/single-token/pilot-paper-rdmreg-p1-mu0-b512/evaluation
 ```
 
 All models report active fraction, dead features, feature variance, and top activating tokens.

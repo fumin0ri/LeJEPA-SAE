@@ -44,6 +44,23 @@ def test_windows_never_cross_sequence_boundaries(tmp_path):
     assert dataset[-1]["token_ids"].tolist() == [8, 9, 10, 11, 12]
 
 
+def test_residual_only_dataset_matches_metadata_dataset(tmp_path):
+    make_activation_store(tmp_path)
+    complete = ActivationWindowDataset(tmp_path, "train", window_size=5, stride=1)
+    residual_only = ActivationWindowDataset(
+        tmp_path,
+        "train",
+        window_size=5,
+        stride=1,
+        include_metadata=False,
+    )
+
+    assert residual_only.records == complete.records
+    assert len(residual_only) == len(complete)
+    assert residual_only[2].keys() == {"residuals"}
+    torch.testing.assert_close(residual_only[2]["residuals"], complete[2]["residuals"])
+
+
 def test_shard_aware_sampler_covers_each_window_once(tmp_path):
     make_activation_store(tmp_path)
     dataset = ActivationWindowDataset(tmp_path, "train", window_size=5, stride=1)

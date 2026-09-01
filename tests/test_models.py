@@ -1,10 +1,12 @@
+import copy
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, load_config
 from lejepa_sae.models import SharedWindowEncoder, build_model
-from lejepa_sae.train import compute_loss
+from lejepa_sae.train import compute_loss, stack_dimension_views
 
 
 def tiny_config(model_type: str = "proposed") -> ExperimentConfig:
@@ -87,6 +89,56 @@ def test_single_token_jepa_reports_collapse_diagnostics():
     }
     assert expected <= metrics.keys()
     assert torch.isfinite(loss)
+
+
+def test_single_token_jepa_can_skip_expensive_diagnostics():
+    config = tiny_config("single_token_jepa")
+    model = build_model(config)
+    residuals = torch.randn(8, 1, config.model.d_llm)
+    _, metrics = compute_loss(model, residuals, config, include_diagnostics=False)
+
+    assert {
+        "loss",
+        "invariance",
+        "distribution",
+        "global_distribution",
+        "local_distribution",
+    } == metrics.keys()
+    assert "feature_std" not in metrics
+
+
+def test_batched_dimension_views_match_individual_forwards_and_gradients():
+    torch.manual_seed(15)
+    config = tiny_config("single_token_jepa")
+    batched_model = build_model(config)
+    loop_model = copy.deepcopy(batched_model)
+    residuals = torch.randn(6, config.model.d_llm)
+    local_masks = [
+        torch.tensor(
+            [[(column + row + view) % 2 == 0 for column in range(config.model.d_llm)]
+             for row in range(residuals.shape[0])]
+        )
+        for view in range(config.model.num_local_views)
+    ]
+
+    residual_views, masks = stack_dimension_views(
+        residuals, local_masks, include_global=True
+    )
+    batched_features = batched_model(residual_views, masks).features
+    loop_features = torch.stack(
+        [
+            loop_model(residuals).features,
+            *(loop_model(residuals, mask).features for mask in local_masks),
+        ]
+    )
+    torch.testing.assert_close(batched_features, loop_features)
+
+    batched_features.square().mean().backward()
+    loop_features.square().mean().backward()
+    for batched_parameter, loop_parameter in zip(
+        batched_model.parameters(), loop_model.parameters(), strict=True
+    ):
+        torch.testing.assert_close(batched_parameter.grad, loop_parameter.grad)
 
 
 def test_positions_affect_encoding():
@@ -179,6 +231,10 @@ def test_single_token_preset_uses_paper_stabilization_defaults():
     assert config.loss.rdm_projections == 8192
     assert config.loss.invariance_weight == 25.0
     assert config.loss.lambda_rdm == 125.0
-    assert config.train.batch_size == 128
-    assert config.train.gradient_accumulation_steps == 4
+    assert config.train.batch_size == 512
+    assert config.train.gradient_accumulation_steps == 1
+    assert config.train.max_steps == 10000
+    assert config.train.eval_batches == 12
+    assert config.train.checkpoint_every == 10000
+    assert "pilot" in config.train.output_dir
     assert config.train.resume_from is None

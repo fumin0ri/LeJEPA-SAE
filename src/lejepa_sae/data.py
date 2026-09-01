@@ -55,6 +55,7 @@ class ActivationWindowDataset(Dataset[dict[str, Any]]):
         window_size: int = 10,
         stride: int = 1,
         cache_shards: int = 2,
+        include_metadata: bool = True,
     ) -> None:
         if split not in SPLITS:
             raise ValueError(f"split must be one of {SPLITS}")
@@ -64,6 +65,7 @@ class ActivationWindowDataset(Dataset[dict[str, Any]]):
         self.window_size = window_size
         self.stride = stride
         self.cache_shards = max(cache_shards, 1)
+        self.include_metadata = include_metadata
         self._cache: OrderedDict[Path, dict[str, torch.Tensor]] = OrderedDict()
 
         manifest_path = self.root / "manifest.json"
@@ -125,8 +127,11 @@ class ActivationWindowDataset(Dataset[dict[str, Any]]):
         start = record.offset + within_sequence * self.stride
         stop = start + self.window_size
         shard = self._load_shard(record.shard_path)
+        residuals = shard["activations"][start:stop]
+        if not self.include_metadata:
+            return {"residuals": residuals}
         return {
-            "residuals": shard["activations"][start:stop],
+            "residuals": residuals,
             "token_ids": shard["token_ids"][start:stop].long(),
             "positions": torch.arange(self.window_size, dtype=torch.long),
             "document_id": record.document_id,

@@ -153,21 +153,31 @@ def sliced_wasserstein_2_with_projections(
     targets: torch.Tensor,
     projection_vectors: torch.Tensor,
 ) -> torch.Tensor:
-    """Empirical sliced W2 for explicit shared projection rows [projections, features]."""
-    if values.shape != targets.shape or values.ndim != 2:
-        raise ValueError("values and targets must have the same [batch, features] shape")
-    if projection_vectors.ndim != 2 or projection_vectors.shape[1] != values.shape[1]:
+    """Empirical sliced W2, optionally vectorized over a leading view dimension."""
+    if values.shape != targets.shape or values.ndim not in {2, 3}:
+        raise ValueError(
+            "values and targets must have the same [batch, features] or "
+            "[views, batch, features] shape"
+        )
+    if projection_vectors.ndim != 2 or projection_vectors.shape[1] != values.shape[-1]:
         raise ValueError("projection_vectors must have shape [projections, features]")
 
-    projected_values = (values @ projection_vectors.T).sort(dim=0).values
+    leading_shape = values.shape[:-1]
+    projected_values = (values.reshape(-1, values.shape[-1]) @ projection_vectors.T).reshape(
+        *leading_shape, projection_vectors.shape[0]
+    )
+    projected_values = projected_values.sort(dim=-2).values
     with torch.no_grad():
-        projected_targets = (targets @ projection_vectors.T).sort(dim=0).values
+        projected_targets = (
+            targets.reshape(-1, targets.shape[-1]) @ projection_vectors.T
+        ).reshape(*leading_shape, projection_vectors.shape[0])
+        projected_targets = projected_targets.sort(dim=-2).values
     difference = projected_values.float() - projected_targets.float()
-    return difference.square().mean()
+    return difference.square().mean(dim=(-2, -1))
 
 
 def rectified_lp_rdm_regularization(
-    feature_views: list[torch.Tensor],
+    feature_views: list[torch.Tensor] | torch.Tensor,
     num_projections: int,
     lp_norm_parameter: float,
     mean_shift_value: float,
@@ -175,13 +185,17 @@ def rectified_lp_rdm_regularization(
     projection_vectors: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
     """Paper-aligned multi-view RDMReg with shared directions and independent RGG targets."""
-    if not feature_views:
-        raise ValueError("At least one feature view is required")
-    reference = feature_views[0]
-    if reference.ndim != 2:
-        raise ValueError("feature views must have shape [batch, features]")
-    if any(view.shape != reference.shape for view in feature_views):
-        raise ValueError("all feature views must have the same shape")
+    if isinstance(feature_views, list):
+        if not feature_views:
+            raise ValueError("At least one feature view is required")
+        if any(view.shape != feature_views[0].shape for view in feature_views):
+            raise ValueError("all feature views must have the same shape")
+        feature_tensor = torch.stack(feature_views)
+    else:
+        feature_tensor = feature_views
+    if feature_tensor.ndim != 3 or feature_tensor.shape[0] < 1:
+        raise ValueError("feature views must have shape [views, batch, features]")
+    reference = feature_tensor[0]
 
     if projection_vectors is None:
         projection_vectors = random_unit_projections(
@@ -196,19 +210,18 @@ def rectified_lp_rdm_regularization(
     projection_vectors = projection_vectors.to(device=reference.device, dtype=reference.dtype)
 
     sigma = generalized_gaussian_unit_variance_sigma(lp_norm_parameter)
-    view_losses = []
-    for features in feature_views:
-        target = sample_rectified_generalized_gaussian_like(
-            features,
-            lp_norm_parameter,
-            mean_shift_value,
-            sigma,
-            generator,
-        )
-        view_losses.append(
-            sliced_wasserstein_2_with_projections(features, target, projection_vectors)
-        )
-    return torch.stack(view_losses).mean(), view_losses
+    targets = sample_rectified_generalized_gaussian_like(
+        feature_tensor,
+        lp_norm_parameter,
+        mean_shift_value,
+        sigma,
+        generator,
+    )
+    view_loss_tensor = sliced_wasserstein_2_with_projections(
+        feature_tensor, targets, projection_vectors
+    )
+    view_losses = list(view_loss_tensor.unbind())
+    return view_loss_tensor.mean(), view_losses
 
 
 @torch.no_grad()

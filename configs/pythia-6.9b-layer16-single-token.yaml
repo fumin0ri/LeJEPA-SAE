@@ -40,16 +40,16 @@ train:
   seed: 42
   device: cuda
   precision: bfloat16
-  batch_size: 128
-  gradient_accumulation_steps: 4
-  max_steps: 100000
+  batch_size: 512
+  gradient_accumulation_steps: 1
+  max_steps: 10000
   learning_rate: 0.0001
   weight_decay: 0.01
   warmup_steps: 2000
   max_grad_norm: 1.0
   log_every: 20
   eval_every: 1000
-  checkpoint_every: 5000
-  eval_batches: 50
-  output_dir: runs/the-pile/pythia-6.9b-layer16/single-token/paper-rdmreg-p1-mu0
+  checkpoint_every: 10000
+  eval_batches: 12
+  output_dir: runs/the-pile/pythia-6.9b-layer16/single-token/pilot-paper-rdmreg-p1-mu0-b512
   resume_from: null

@@ -106,6 +106,34 @@ def test_explicit_sliced_wasserstein_is_permutation_invariant():
     torch.testing.assert_close(baseline, permuted)
 
 
+def test_vectorized_sliced_wasserstein_matches_view_loop_and_gradient():
+    vectorized_values = torch.randn(5, 12, 16, requires_grad=True)
+    loop_values = vectorized_values.detach().clone().requires_grad_(True)
+    targets = torch.randn(5, 12, 16)
+    projections = random_unit_projections(
+        8,
+        16,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        generator=torch.Generator().manual_seed(14),
+    )
+
+    vectorized_losses = sliced_wasserstein_2_with_projections(
+        vectorized_values, targets, projections
+    )
+    loop_losses = torch.stack(
+        [
+            sliced_wasserstein_2_with_projections(view, target, projections)
+            for view, target in zip(loop_values, targets, strict=True)
+        ]
+    )
+    torch.testing.assert_close(vectorized_losses, loop_losses)
+
+    vectorized_losses.mean().backward()
+    loop_losses.mean().backward()
+    torch.testing.assert_close(vectorized_values.grad, loop_values.grad)
+
+
 def test_paper_rdm_uses_shared_projections_and_independent_targets():
     features = [torch.randn(32, 16).relu().requires_grad_(True) for _ in range(5)]
     projections = random_unit_projections(
