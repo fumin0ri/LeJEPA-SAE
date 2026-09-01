@@ -126,8 +126,10 @@ lejepa-evaluate \
 
 Open `evaluation/index.html` first. Evaluation writes:
 
-- `index.html`: metric cards, collapse status, feature histograms, and searchable top activations
-- `summary.md`: compact core-metric table and the 20 highest-variance features
+- `index.html`: metric cards, training curves, collapse status, feature histograms, and searchable top activations
+- `summary.md`: compact core-metric table, training curves, and the 20 highest-variance features
+- `training_curves.svg`: train/validation Active fraction, Global-local MSE, random/axis RDMReg, and feature standard deviation over steps
+- `training_history.csv`: the scalar history used to draw the training curves
 - `feature_diagnostics.svg`: active-rate, standard-deviation, and maximum-activation distributions
 - `feature_metrics.csv`: per-feature active rate, mean, standard deviation, and maximum
 - `metrics.json`: machine-readable aggregate metrics
@@ -136,6 +138,10 @@ Open `evaluation/index.html` first. Evaluation writes:
 The proposed model reports active fraction, dead-feature fraction, feature variance,
 global-local MSE, and feature-support Jaccard. Optionally pass `--concept-labels labels.json`, where
 the JSON maps `document_id` to a concept label, to add merging/splitting proxies.
+
+Evaluation automatically reads `metrics.jsonl` from the `train.output_dir` stored in the resolved
+config. If the history was moved, pass `--training-metrics /path/to/metrics.jsonl`. Missing inferred
+history does not prevent evaluation; the report explains how to attach it.
 
 ## 4. Local gradient intervention
 

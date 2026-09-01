@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: E501
 import csv
 import html
+import json
 import math
 from pathlib import Path
 from typing import Any
@@ -113,11 +114,244 @@ def write_feature_diagnostics_svg(
     output_path.write_text("".join(pieces), encoding="utf-8")
 
 
+TRAINING_HISTORY_FIELDS = [
+    "kind",
+    "step",
+    "active_fraction",
+    "global_active_fraction",
+    "local_active_fraction",
+    "invariance",
+    "random_distribution",
+    "axis_distribution",
+    "feature_std",
+    "global_dead_feature_fraction",
+    "local_dead_feature_fraction",
+]
+
+
+def load_training_history(metrics_path: Path) -> list[dict[str, Any]]:
+    """Load finite scalar training metrics while tolerating interrupted JSONL tails."""
+    history: list[dict[str, Any]] = []
+    for line in metrics_path.read_text(encoding="utf-8").splitlines():
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        step = raw.get("step")
+        if (
+            not isinstance(step, int | float)
+            or isinstance(step, bool)
+            or not math.isfinite(float(step))
+        ):
+            continue
+        record: dict[str, Any] = {
+            "kind": str(raw.get("kind", "train")),
+            "step": float(step),
+        }
+        for key in TRAINING_HISTORY_FIELDS[2:]:
+            value = raw.get(key)
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                value = float(value)
+                if math.isfinite(value):
+                    record[key] = value
+        history.append(record)
+    return sorted(history, key=lambda row: (float(row["step"]), str(row["kind"])))
+
+
+def _write_training_history_csv(
+    output_path: Path, history: list[dict[str, Any]]
+) -> None:
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=TRAINING_HISTORY_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(history)
+
+
+def _training_series(
+    history: list[dict[str, Any]], key: str, kind: str
+) -> list[tuple[float, float]]:
+    return [
+        (float(row["step"]), float(row[key]))
+        for row in history
+        if row.get("kind") == kind and key in row
+    ]
+
+
+def _chart_coordinate(
+    step: float,
+    value: float,
+    *,
+    log_scale: bool,
+    min_step: float,
+    max_step: float,
+    min_value: float,
+    max_value: float,
+    x0: float,
+    y0: float,
+    plot_width: float,
+    plot_height: float,
+) -> tuple[float, float] | None:
+    if log_scale and value <= 0:
+        return None
+    scaled_value = math.log10(value) if log_scale else value
+    x = x0 + (step - min_step) / (max_step - min_step) * plot_width
+    y = y0 + plot_height - (scaled_value - min_value) / (max_value - min_value) * plot_height
+    return x, y
+
+
+def write_training_curves_svg(
+    output_path: Path, history: list[dict[str, Any]]
+) -> None:
+    panels = [
+        (
+            "Active fraction",
+            False,
+            [
+                ("active_fraction", "train", "Train", "#4f46e5"),
+                ("active_fraction", "validation", "Validation", "#db2777"),
+                ("global_active_fraction", "train", "Global", "#059669"),
+                ("local_active_fraction", "train", "Local", "#d97706"),
+            ],
+        ),
+        (
+            "Global-local MSE",
+            True,
+            [
+                ("invariance", "train", "Train", "#4f46e5"),
+                ("invariance", "validation", "Validation", "#db2777"),
+            ],
+        ),
+        (
+            "Random vs axis RDMReg",
+            True,
+            [
+                ("random_distribution", "train", "Random train", "#2563eb"),
+                ("axis_distribution", "train", "Axis train", "#ea580c"),
+                ("random_distribution", "validation", "Random val", "#0891b2"),
+                ("axis_distribution", "validation", "Axis val", "#be123c"),
+            ],
+        ),
+        (
+            "Feature standard deviation",
+            False,
+            [
+                ("feature_std", "train", "Train", "#4f46e5"),
+                ("feature_std", "validation", "Validation", "#db2777"),
+            ],
+        ),
+    ]
+    width, height = 1200, 760
+    panel_width, panel_height = 550, 300
+    plot_left, plot_top, plot_width, plot_height = 62, 58, 458, 190
+    pieces = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#f8fafc"/>',
+        '<style>text{font-family:Inter,Arial,sans-serif;fill:#172033}.title{font-size:18px;font-weight:700}'
+        '.tick{font-size:11px;fill:#64748b}.legend{font-size:11px;fill:#334155}</style>',
+    ]
+    for panel_index, (title, log_scale, definitions) in enumerate(panels):
+        panel_x = 30 + (panel_index % 2) * 585
+        panel_y = 25 + (panel_index // 2) * 360
+        x0, y0 = panel_x + plot_left, panel_y + plot_top
+        series = [
+            (label, color, kind, _training_series(history, key, kind))
+            for key, kind, label, color in definitions
+        ]
+        series = [item for item in series if item[3]]
+        points = [point for _, _, _, values in series for point in values]
+        pieces.extend(
+            [
+                f'<rect x="{panel_x}" y="{panel_y}" width="{panel_width}" height="{panel_height}" rx="14" fill="#fff" stroke="#dce3ee"/>',
+                f'<text class="title" x="{panel_x + 22}" y="{panel_y + 32}">{html.escape(title)}</text>',
+            ]
+        )
+        if not points:
+            pieces.append(
+                f'<text class="tick" x="{x0}" y="{y0 + 90}">No recorded values</text>'
+            )
+            continue
+        min_step, max_step = min(p[0] for p in points), max(p[0] for p in points)
+        if max_step <= min_step:
+            max_step = min_step + 1.0
+        transformed = [
+            math.log10(value) if log_scale and value > 0 else value
+            for _, value in points
+            if not log_scale or value > 0
+        ]
+        if not transformed:
+            pieces.append(
+                f'<text class="tick" x="{x0}" y="{y0 + 90}">No positive finite values</text>'
+            )
+            continue
+        min_value, max_value = min(transformed), max(transformed)
+        padding = max((max_value - min_value) * 0.08, 0.02 if not log_scale else 0.08)
+        min_value -= padding
+        max_value += padding
+
+        for fraction in (0.0, 0.5, 1.0):
+            y = y0 + plot_height * (1 - fraction)
+            raw_value = min_value + (max_value - min_value) * fraction
+            label = f"{10 ** raw_value:.2g}" if log_scale else f"{raw_value:.3g}"
+            pieces.extend(
+                [
+                    f'<line x1="{x0}" y1="{y:.2f}" x2="{x0 + plot_width}" y2="{y:.2f}" stroke="#e2e8f0"/>',
+                    f'<text class="tick" text-anchor="end" x="{x0 - 8}" y="{y + 4:.2f}">{label}</text>',
+                ]
+            )
+        pieces.extend(
+            [
+                f'<text class="tick" x="{x0}" y="{y0 + plot_height + 20}">{min_step:g}</text>',
+                f'<text class="tick" text-anchor="end" x="{x0 + plot_width}" y="{y0 + plot_height + 20}">{max_step:g} steps</text>',
+            ]
+        )
+        legend_x = panel_x + 22
+        for series_index, (label, color, kind, values) in enumerate(series):
+            dash = ' stroke-dasharray="7 5"' if kind == "validation" else ""
+            valid = [
+                _chart_coordinate(
+                    step,
+                    value,
+                    log_scale=log_scale,
+                    min_step=min_step,
+                    max_step=max_step,
+                    min_value=min_value,
+                    max_value=max_value,
+                    x0=x0,
+                    y0=y0,
+                    plot_width=plot_width,
+                    plot_height=plot_height,
+                )
+                for step, value in values
+            ]
+            valid = [point for point in valid if point is not None]
+            if not valid:
+                continue
+            polyline = " ".join(f"{x:.2f},{y:.2f}" for x, y in valid)
+            pieces.append(
+                f'<polyline points="{polyline}" fill="none" stroke="{color}" stroke-width="2.5"{dash}/>'
+            )
+            for x, y in valid:
+                pieces.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2.7" fill="{color}"/>')
+            legend_y = panel_y + 280
+            item_x = legend_x + series_index * 124
+            pieces.extend(
+                [
+                    f'<line x1="{item_x}" y1="{legend_y - 4}" x2="{item_x + 18}" y2="{legend_y - 4}" stroke="{color}" stroke-width="2.5"{dash}/>',
+                    f'<text class="legend" x="{item_x + 23}" y="{legend_y}">{html.escape(label)}</text>',
+                ]
+            )
+    pieces.append("</svg>")
+    output_path.write_text("".join(pieces), encoding="utf-8")
+
+
 def write_evaluation_report(
     output: Path,
     metrics: dict[str, float],
     feature_rows: list[dict[str, float | int]],
     top_records: list[dict[str, Any]],
+    training_history: list[dict[str, Any]] | None = None,
 ) -> None:
     with (output / "feature_metrics.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
@@ -128,6 +362,10 @@ def write_evaluation_report(
         writer.writerows(feature_rows)
 
     write_feature_diagnostics_svg(output / "feature_diagnostics.svg", feature_rows)
+    training_history = training_history or []
+    if training_history:
+        _write_training_history_csv(output / "training_history.csv", training_history)
+        write_training_curves_svg(output / "training_curves.svg", training_history)
     status, status_class = collapse_assessment(metrics)
     ranked = sorted(feature_rows, key=lambda row: float(row["std"]), reverse=True)
     record_by_feature = {int(record["feature"]): record for record in top_records}
@@ -145,8 +383,23 @@ def write_evaluation_report(
     for key, value in metrics.items():
         label, description = METRIC_LABELS.get(key, (key.replace("_", " ").title(), ""))
         markdown.append(f"| {label} | {_format_metric(key, value)} | {description} |")
+    if training_history:
+        markdown.extend(
+            [
+                "",
+                "## Training curves",
+                "",
+                "![Training curves](training_curves.svg)",
+            ]
+        )
+    raw_artifacts = ["`metrics.json`", "`feature_metrics.csv`"]
+    if training_history:
+        raw_artifacts.append("`training_history.csv`")
+    raw_artifacts.append("`top_tokens.jsonl`")
     markdown.extend(
         [
+            "",
+            "## Feature distributions",
             "",
             "![Feature diagnostics](feature_diagnostics.svg)",
             "",
@@ -168,7 +421,7 @@ def write_evaluation_report(
         [
             "",
             "Open `index.html` for the interactive, searchable feature report. Raw data remains in",
-            "`metrics.json`, `feature_metrics.csv`, and `top_tokens.jsonl`.",
+            f'{", ".join(raw_artifacts[:-1])}, and {raw_artifacts[-1]}.',
             "",
         ]
     )
@@ -202,6 +455,13 @@ def write_evaluation_report(
             f'<ol>{example_html}</ol></details>'
         )
 
+    training_section = (
+        '<h2>Training curves</h2><p>Train and validation history from metrics.jsonl. '
+        'Global-local MSE and RDMReg use logarithmic scales.</p>'
+        '<img class="chart" src="training_curves.svg" alt="Active fraction, global-local MSE, RDMReg, and feature standard deviation over training">'
+        if training_history
+        else '<h2>Training curves</h2><p class="card-help">No training metrics history was found. Pass <code>--training-metrics</code> to include it.</p>'
+    )
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>LeJEPA-SAE evaluation</title><style>
@@ -218,7 +478,7 @@ details{{margin:9px 0;padding:13px 16px}}summary{{cursor:pointer;font-weight:800
 li{{margin:10px 0}}.score{{display:inline-block;min-width:68px;color:var(--accent);font-weight:800}}small{{display:block;margin-left:72px}}
 </style></head><body><main><h1>Single-token JEPA evaluation</h1>
 <div class="status {status_class}">{html.escape(status)}</div>
-<section class="cards">{"".join(cards)}</section><h2>Feature distributions</h2>
+<section class="cards">{"".join(cards)}</section>{training_section}<h2>Feature distributions</h2>
 <img class="chart" src="feature_diagnostics.svg" alt="Feature diagnostic histograms">
 <h2>Highest-variance features</h2><p>Showing 50 features. Search decoded top activations.</p>
 <input id="search" type="search" placeholder="Search feature number or activation text">

@@ -65,6 +65,44 @@ def test_evaluation_metrics_and_report_artifacts(
     tmp_path, monkeypatch, model_type, expected_metrics
 ):
     activation_dir = make_test_store(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    training_records = [
+        {
+            "kind": "train",
+            "step": 1,
+            "active_fraction": 0.48,
+            "global_active_fraction": 0.5,
+            "local_active_fraction": 0.46,
+            "invariance": 0.4,
+            "random_distribution": 0.8,
+            "axis_distribution": 0.7,
+            "feature_std": 0.2,
+        },
+        {
+            "kind": "train",
+            "step": 2,
+            "active_fraction": 0.51,
+            "global_active_fraction": 0.52,
+            "local_active_fraction": 0.5,
+            "invariance": 0.2,
+            "random_distribution": 0.5,
+            "axis_distribution": 0.4,
+            "feature_std": 0.3,
+        },
+        {
+            "kind": "validation",
+            "step": 2,
+            "active_fraction": 0.49,
+            "invariance": 0.24,
+            "random_distribution": 0.54,
+            "axis_distribution": 0.45,
+            "feature_std": 0.28,
+        },
+    ]
+    (run_dir / "metrics.jsonl").write_text(
+        "\n".join(json.dumps(record) for record in training_records), encoding="utf-8"
+    )
     config = ExperimentConfig(
         data=DataConfig(
             activation_dir=str(activation_dir),
@@ -79,7 +117,9 @@ def test_evaluation_metrics_and_report_artifacts(
             num_local_views=2,
             dimension_keep_fraction=0.5,
         ),
-        train=TrainConfig(device="cpu", precision="float32", batch_size=2),
+        train=TrainConfig(
+            device="cpu", precision="float32", batch_size=2, output_dir=str(run_dir)
+        ),
     )
     config.loss.axis_projections = 4
     config.validate()
@@ -111,6 +151,15 @@ def test_evaluation_metrics_and_report_artifacts(
     assert (output_dir / "feature_metrics.csv").exists()
     assert "Evaluation summary" in (output_dir / "summary.md").read_text(encoding="utf-8")
     assert "<svg" in (output_dir / "feature_diagnostics.svg").read_text(encoding="utf-8")
+    training_chart = (output_dir / "training_curves.svg").read_text(encoding="utf-8")
+    assert "Active fraction" in training_chart
+    assert "Global-local MSE" in training_chart
+    assert "Random vs axis RDMReg" in training_chart
+    assert "Feature standard deviation" in training_chart
+    assert len(
+        (output_dir / "training_history.csv").read_text(encoding="utf-8").splitlines()
+    ) == 4
     dashboard = (output_dir / "index.html").read_text(encoding="utf-8")
     assert "Single-token JEPA evaluation" in dashboard
+    assert "Training curves" in dashboard
     assert "Highest-variance features" in dashboard

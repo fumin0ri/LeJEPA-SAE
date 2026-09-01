@@ -12,7 +12,7 @@ from transformers import AutoTokenizer
 from .config import ExperimentConfig, load_config
 from .data import ActivationWindowDataset
 from .models import build_model
-from .reporting import write_evaluation_report
+from .reporting import load_training_history, write_evaluation_report
 from .train import autocast_context, seed_everything
 from .views import sample_dimension_masks
 
@@ -57,8 +57,18 @@ def evaluate(
     top_k: int,
     support_epsilon: float,
     concept_labels_path: str | None = None,
+    training_metrics_path: str | Path | None = None,
 ) -> dict[str, float]:
     seed_everything(config.train.seed)
+    if training_metrics_path is not None:
+        history_path = Path(training_metrics_path)
+        if not history_path.is_file():
+            raise FileNotFoundError(f"Training metrics not found: {history_path}")
+    else:
+        history_path = Path(config.train.output_dir) / "metrics.jsonl"
+    training_history = (
+        load_training_history(history_path) if history_path.is_file() else []
+    )
     device = config.train.device
     dataset = ActivationWindowDataset(
         config.data.activation_dir,
@@ -259,7 +269,13 @@ def evaluate(
         }
         for feature_index in range(feature_dim)
     ]
-    write_evaluation_report(output, result, feature_rows, top_records)
+    write_evaluation_report(
+        output,
+        result,
+        feature_rows,
+        top_records,
+        training_history=training_history,
+    )
     return result
 
 
@@ -274,6 +290,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--support-epsilon", type=float, default=0.0)
     parser.add_argument("--concept-labels", default=None)
+    parser.add_argument(
+        "--training-metrics",
+        default=None,
+        help="Training metrics JSONL (defaults to <train.output_dir>/metrics.jsonl)",
+    )
     return parser.parse_args()
 
 
@@ -288,6 +309,7 @@ def main() -> None:
         args.top_k,
         args.support_epsilon,
         args.concept_labels,
+        args.training_metrics,
     )
     print(json.dumps(result, indent=2))
 
