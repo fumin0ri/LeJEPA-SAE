@@ -104,7 +104,11 @@ old extraction before rerunning with different settings.
 bash scripts/run_proposed.sh
 ```
 
-The pilot preset uses batch 512, no gradient accumulation, 10,000 steps, and a fresh output at
+The default uses batch 512, no gradient accumulation, and `train.max_steps: one_epoch`. After
+loading the activation manifest, this resolves to the number of complete optimizer batches in the
+actual train split. With 100M total tokens and the default 98%/1%/1% document split, this is about
+191,406 steps; the exact value and consumed sample count are written to `training_plan.json`. The
+fresh output is
 `runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d16384-l0-0.009765625-axis512`.
 The output is deliberately separate from
 pre-axis checkpoints and starts from a fresh initialization. Do not resume a collapsed checkpoint:
@@ -118,7 +122,8 @@ BATCH_SIZE=256 GRADIENT_ACCUMULATION_STEPS=2 bash scripts/run_proposed.sh
 BATCH_SIZE=128 GRADIENT_ACCUMULATION_STEPS=4 bash scripts/run_proposed.sh
 ```
 
-`MAX_STEPS` and `EVAL_BATCHES` are also environment overrides. Training logs core losses every
+Set `MAX_STEPS` to an integer to override one-epoch mode; `EVAL_BATCHES` is also an environment
+override. Training logs core losses every
 batch—including separate `random_distribution` and `axis_distribution` values—collapse
 diagnostics at log steps, interval throughput, and CUDA peak memory. Axis ablations can use, for
 example, `AXIS_PROJECTIONS=256 AXIS_WEIGHT=2.0 bash scripts/run_proposed.sh`; the default output

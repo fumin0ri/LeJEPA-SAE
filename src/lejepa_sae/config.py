@@ -53,7 +53,7 @@ class TrainConfig:
     precision: Literal["float32", "float16", "bfloat16"] = "bfloat16"
     batch_size: int = 512
     gradient_accumulation_steps: int = 1
-    max_steps: int = 10_000
+    max_steps: int | Literal["one_epoch"] = "one_epoch"
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     warmup_steps: int = 2_000
@@ -107,8 +107,12 @@ class ExperimentConfig:
                 raise ValueError("proposed currently supports projection_vectors_type=random")
         if self.train.gradient_accumulation_steps < 1:
             raise ValueError("train.gradient_accumulation_steps must be positive")
-        if self.train.batch_size < 1 or self.train.max_steps < 1:
-            raise ValueError("train.batch_size and train.max_steps must be positive")
+        if self.train.batch_size < 1:
+            raise ValueError("train.batch_size must be positive")
+        if self.train.max_steps != "one_epoch" and (
+            not isinstance(self.train.max_steps, int) or self.train.max_steps < 1
+        ):
+            raise ValueError("train.max_steps must be a positive integer or one_epoch")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

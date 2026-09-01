@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, load_config
 from lejepa_sae.models import ProposedModel, build_model
-from lejepa_sae.train import compute_loss, stack_dimension_views
+from lejepa_sae.train import compute_loss, resolve_training_steps, stack_dimension_views
 
 
 def tiny_config(model_type: str = "proposed") -> ExperimentConfig:
@@ -222,10 +222,21 @@ def test_main_preset_uses_single_token_paper_defaults():
     assert config.loss.lambda_rdm == 125.0
     assert config.train.batch_size == 512
     assert config.train.gradient_accumulation_steps == 1
-    assert config.train.max_steps == 10000
+    assert config.train.max_steps == "one_epoch"
     assert config.train.eval_batches == 12
     assert config.train.checkpoint_every == 10000
     assert config.train.output_dir.endswith(
         "/proposed-d16384-l0-0.009765625-axis512"
     )
     assert config.train.resume_from is None
+
+
+def test_one_epoch_steps_use_complete_optimizer_batches():
+    assert resolve_training_steps("one_epoch", 191_406, 1) == 191_406
+    assert resolve_training_steps("one_epoch", 382_812, 2) == 191_406
+    assert resolve_training_steps(10_000, 191_406, 1) == 10_000
+
+
+def test_one_epoch_requires_at_least_one_optimizer_step():
+    with pytest.raises(ValueError, match="does not contain enough batches"):
+        resolve_training_steps("one_epoch", 1, 2)

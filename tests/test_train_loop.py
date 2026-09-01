@@ -77,6 +77,10 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
     assert state["step"] == 2
     run_dir = tmp_path / f"run-{model_type}"
     assert (run_dir / "config.resolved.yaml").exists()
+    training_plan = json.loads((run_dir / "training_plan.json").read_text())
+    assert training_plan["requested_max_steps"] == 2
+    assert training_plan["resolved_max_steps"] == 2
+    assert training_plan["sample_delta_from_one_epoch"] == 2
     records = [
         json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()
     ]

@@ -9,8 +9,14 @@ axis_weight="${AXIS_WEIGHT:-1.0}"
 output_dir="${2:-runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d$feature_dim-l0-$expected_l0_fraction-axis$axis_projections}"
 batch_size="${BATCH_SIZE:-512}"
 gradient_accumulation_steps="${GRADIENT_ACCUMULATION_STEPS:-1}"
-max_steps="${MAX_STEPS:-10000}"
 eval_batches="${EVAL_BATCHES:-12}"
+max_step_args=()
+if [[ -n "${MAX_STEPS:-}" ]]; then
+  max_step_args=(
+    --set "train.max_steps=$MAX_STEPS"
+    --set "train.checkpoint_every=$MAX_STEPS"
+  )
+fi
 
 lejepa-train --config "$config" \
   --set model.type=proposed \
@@ -20,8 +26,7 @@ lejepa-train --config "$config" \
   --set "loss.axis_weight=$axis_weight" \
   --set "train.batch_size=$batch_size" \
   --set "train.gradient_accumulation_steps=$gradient_accumulation_steps" \
-  --set "train.max_steps=$max_steps" \
   --set "train.eval_batches=$eval_batches" \
-  --set "train.checkpoint_every=$max_steps" \
+  "${max_step_args[@]}" \
   --set "train.output_dir=$output_dir" \
   --set train.resume_from=null

@@ -246,6 +246,22 @@ def aggregate_metrics(metrics: list[dict[str, torch.Tensor]]) -> dict[str, float
     }
 
 
+def resolve_training_steps(
+    requested_max_steps: int | str,
+    train_batches: int,
+    gradient_accumulation_steps: int,
+) -> int:
+    if requested_max_steps != "one_epoch":
+        return int(requested_max_steps)
+    optimizer_steps = train_batches // gradient_accumulation_steps
+    if optimizer_steps < 1:
+        raise ValueError(
+            "One epoch does not contain enough batches for one optimizer step; reduce "
+            "train.batch_size or train.gradient_accumulation_steps"
+        )
+    return optimizer_steps
+
+
 @torch.no_grad()
 def evaluate_loss(
     model: nn.Module,
@@ -306,11 +322,38 @@ def train(config: ExperimentConfig) -> Path:
             f"{train_loader.dataset.d_llm}"
         )
 
+    requested_max_steps = config.train.max_steps
+    config.train.max_steps = resolve_training_steps(
+        requested_max_steps,
+        len(train_loader),
+        config.train.gradient_accumulation_steps,
+    )
+
     output_dir = Path(config.train.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "config.resolved.yaml").write_text(
         yaml.safe_dump(config.to_dict(), sort_keys=False), encoding="utf-8"
     )
+    training_plan = {
+        "requested_max_steps": requested_max_steps,
+        "resolved_max_steps": config.train.max_steps,
+        "train_samples": len(train_loader.dataset),
+        "train_batches": len(train_loader),
+        "batch_size": config.train.batch_size,
+        "gradient_accumulation_steps": config.train.gradient_accumulation_steps,
+        "consumed_samples": (
+            config.train.max_steps
+            * config.train.batch_size
+            * config.train.gradient_accumulation_steps
+        ),
+    }
+    training_plan["sample_delta_from_one_epoch"] = (
+        training_plan["train_samples"] - training_plan["consumed_samples"]
+    )
+    (output_dir / "training_plan.json").write_text(
+        json.dumps(training_plan, indent=2), encoding="utf-8"
+    )
+    print(json.dumps({"kind": "training_plan", **training_plan}), flush=True)
     metrics_path = output_dir / "metrics.jsonl"
 
     model = build_model(config).to(config.train.device)
