@@ -52,7 +52,7 @@ class ActivationWindowDataset(Dataset[dict[str, Any]]):
         self,
         activation_dir: str | Path,
         split: str,
-        window_size: int = 10,
+        window_size: int = 1,
         stride: int = 1,
         cache_shards: int = 2,
         include_metadata: bool = True,
@@ -133,7 +133,6 @@ class ActivationWindowDataset(Dataset[dict[str, Any]]):
         return {
             "residuals": residuals,
             "token_ids": shard["token_ids"][start:stop].long(),
-            "positions": torch.arange(self.window_size, dtype=torch.long),
             "document_id": record.document_id,
             "segment_index": record.segment_index,
             "window_start": within_sequence * self.stride,

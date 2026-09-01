@@ -54,14 +54,14 @@ def make_test_store(tmp_path):
     ("model_type", "expected_metrics"),
     [
         ("standard_sae", {"full_reconstruction_mse"}),
-        ("single_token_jepa", {"global_local_mse", "support_jaccard"}),
+        ("proposed", {"global_local_mse", "support_jaccard"}),
         (
             "dimension_denoising_sae",
             {"full_reconstruction_mse", "masked_reconstruction_mse"},
         ),
     ],
 )
-def test_single_token_evaluation_metrics(
+def test_evaluation_metrics_and_report_artifacts(
     tmp_path, monkeypatch, model_type, expected_metrics
 ):
     activation_dir = make_test_store(tmp_path)
@@ -75,11 +75,7 @@ def test_single_token_evaluation_metrics(
         model=ModelConfig(
             type=model_type,
             d_llm=8,
-            d_encoder=8,
-            num_layers=1,
-            num_heads=2,
             feature_dim=16,
-            local_tokens=1,
             num_local_views=2,
             dimension_keep_fraction=0.5,
         ),
@@ -97,15 +93,23 @@ def test_single_token_evaluation_metrics(
         config,
         checkpoint,
         tmp_path / f"evaluation-{model_type}",
-        max_windows=4,
+        max_tokens=4,
         top_k=2,
         support_epsilon=0.0,
     )
 
     assert expected_metrics <= result.keys()
-    assert result["windows"] == 4
+    assert result["tokens"] == 4
     assert len(
-        (tmp_path / f"evaluation-{model_type}" / "top_spans.jsonl")
+        (tmp_path / f"evaluation-{model_type}" / "top_tokens.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()
     ) == 16
+    output_dir = tmp_path / f"evaluation-{model_type}"
+    assert (output_dir / "metrics.json").exists()
+    assert (output_dir / "feature_metrics.csv").exists()
+    assert "Evaluation summary" in (output_dir / "summary.md").read_text(encoding="utf-8")
+    assert "<svg" in (output_dir / "feature_diagnostics.svg").read_text(encoding="utf-8")
+    dashboard = (output_dir / "index.html").read_text(encoding="utf-8")
+    assert "Single-token JEPA evaluation" in dashboard
+    assert "Highest-variance features" in dashboard

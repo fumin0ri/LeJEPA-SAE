@@ -6,26 +6,16 @@ from typing import Any, Literal
 
 import yaml
 
-ModelType = Literal[
-    "proposed",
-    "sparse_jepa_full_view",
-    "jepa_sigreg",
-    "standard_sae",
-    "window_autoencoder",
-    "single_token_jepa",
-    "dimension_denoising_sae",
-]
-
-TOKEN_VIEW_MODEL_TYPES = {"proposed", "sparse_jepa_full_view", "jepa_sigreg"}
-DIMENSION_VIEW_MODEL_TYPES = {"single_token_jepa", "dimension_denoising_sae"}
+ModelType = Literal["proposed", "standard_sae", "dimension_denoising_sae"]
+MODEL_TYPES = {"proposed", "standard_sae", "dimension_denoising_sae"}
 
 
 @dataclass
 class DataConfig:
     activation_dir: str = "data/pythia-6.9b/layer-16"
-    window_size: int = 10
+    window_size: int = 1
     train_stride: int = 1
-    eval_stride: int = 10
+    eval_stride: int = 1
     num_workers: int = 4
     cache_shards_per_worker: int = 1
 
@@ -34,31 +24,21 @@ class DataConfig:
 class ModelConfig:
     type: ModelType = "proposed"
     d_llm: int = 4096
-    d_encoder: int = 256
-    num_layers: int = 3
-    num_heads: int = 4
-    mlp_ratio: int = 4
     feature_dim: int = 8192
-    dropout: float = 0.0
-    attention: Literal["causal", "bidirectional"] = "causal"
     num_local_views: int = 4
-    local_tokens: int = 3
     dimension_keep_fraction: float = 0.5
-    sparse_bias: float = 0.0
 
 
 @dataclass
 class LossConfig:
-    lambda_rdm: float = 1.0
-    rdm_projections: int = 32
-    target_active_fraction: float = 0.10
-    target_sigma: float = 1.0
+    lambda_rdm: float = 125.0
+    rdm_projections: int = 8192
     target_distribution: str = "rectified_lp_distribution"
     lp_norm_parameter: float = 1.0
     mean_shift_value: float = 0.0
     mode_of_sigma: str = "sigma_GN"
     projection_vectors_type: str = "random"
-    invariance_weight: float = 1.0
+    invariance_weight: float = 25.0
     reconstruction_weight: float = 1.0
     sae_l1_coefficient: float = 1e-3
 
@@ -68,18 +48,18 @@ class TrainConfig:
     seed: int = 42
     device: str = "cuda"
     precision: Literal["float32", "float16", "bfloat16"] = "bfloat16"
-    batch_size: int = 64
-    gradient_accumulation_steps: int = 8
-    max_steps: int = 100_000
+    batch_size: int = 512
+    gradient_accumulation_steps: int = 1
+    max_steps: int = 10_000
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     warmup_steps: int = 2_000
     max_grad_norm: float = 1.0
     log_every: int = 20
     eval_every: int = 1_000
-    checkpoint_every: int = 5_000
-    eval_batches: int = 50
-    output_dir: str = "runs/proposed-k3"
+    checkpoint_every: int = 10_000
+    eval_batches: int = 12
+    output_dir: str = "runs/the-pile/pythia-6.9b-layer16/proposed"
     resume_from: str | None = None
 
 
@@ -91,46 +71,33 @@ class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
 
     def validate(self) -> None:
-        if self.data.window_size < 1:
-            raise ValueError("data.window_size must be positive")
-        if (
-            self.model.type in TOKEN_VIEW_MODEL_TYPES
-            and not 1 <= self.model.local_tokens <= self.data.window_size
-        ):
-            raise ValueError("model.local_tokens must be in [1, data.window_size]")
-        if self.model.d_encoder % self.model.num_heads:
-            raise ValueError("model.d_encoder must be divisible by model.num_heads")
+        if self.model.type not in MODEL_TYPES:
+            raise ValueError(f"model.type must be one of {sorted(MODEL_TYPES)}")
+        if self.data.window_size != 1:
+            raise ValueError("single-token models require data.window_size=1")
+        if self.model.d_llm < 1 or self.model.feature_dim < 1:
+            raise ValueError("model dimensions must be positive")
         if self.model.num_local_views < 1:
             raise ValueError("model.num_local_views must be positive")
         if not 0.0 < self.model.dimension_keep_fraction <= 1.0:
             raise ValueError("model.dimension_keep_fraction must be in (0, 1]")
-        if (
-            self.model.type in DIMENSION_VIEW_MODEL_TYPES
-            and self.data.window_size != 1
-        ):
-            raise ValueError("dimension-view models require data.window_size=1")
-        if not 0.0 < self.loss.target_active_fraction < 1.0:
-            raise ValueError("loss.target_active_fraction must be in (0, 1)")
         if self.loss.rdm_projections < 1:
             raise ValueError("loss.rdm_projections must be positive")
-        if self.model.type == "single_token_jepa":
+        if self.model.type == "proposed":
             if self.loss.target_distribution != "rectified_lp_distribution":
                 raise ValueError(
-                    "single_token_jepa requires loss.target_distribution="
-                    "rectified_lp_distribution"
+                    "proposed requires loss.target_distribution=rectified_lp_distribution"
                 )
             if self.loss.lp_norm_parameter <= 0:
                 raise ValueError("loss.lp_norm_parameter must be positive")
             if self.loss.mode_of_sigma != "sigma_GN":
-                raise ValueError("single_token_jepa currently supports loss.mode_of_sigma=sigma_GN")
+                raise ValueError("proposed currently supports loss.mode_of_sigma=sigma_GN")
             if self.loss.projection_vectors_type != "random":
-                raise ValueError(
-                    "single_token_jepa currently supports loss.projection_vectors_type=random"
-                )
+                raise ValueError("proposed currently supports projection_vectors_type=random")
         if self.train.gradient_accumulation_steps < 1:
             raise ValueError("train.gradient_accumulation_steps must be positive")
-        if self.model.type == "sparse_jepa_full_view":
-            self.model.local_tokens = self.data.window_size
+        if self.train.batch_size < 1 or self.train.max_steps < 1:
+            raise ValueError("train.batch_size and train.max_steps must be positive")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -8,16 +8,8 @@ from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, TrainCo
 from lejepa_sae.train import train
 
 
-@pytest.mark.parametrize(
-    ("model_type", "window_size"),
-    [
-        ("proposed", 5),
-        ("standard_sae", 1),
-        ("single_token_jepa", 1),
-        ("dimension_denoising_sae", 1),
-    ],
-)
-def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, window_size):
+@pytest.mark.parametrize("model_type", ["proposed", "standard_sae", "dimension_denoising_sae"])
+def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
     activation_dir = tmp_path / "activations"
     shards = []
     for split_index, split in enumerate(("train", "validation", "test")):
@@ -53,19 +45,14 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, window_siz
     config = ExperimentConfig(
         data=DataConfig(
             activation_dir=str(activation_dir),
-            window_size=window_size,
+            window_size=1,
             num_workers=0,
         ),
         model=ModelConfig(
             type=model_type,
             d_llm=8,
-            d_encoder=8,
-            num_layers=1,
-            num_heads=2,
-            mlp_ratio=2,
             feature_dim=16,
             num_local_views=2,
-            local_tokens=min(2, window_size),
         ),
         train=TrainConfig(
             device="cpu",
@@ -96,5 +83,5 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, window_siz
     train_records = [record for record in records if record["kind"] == "train"]
     assert all(record["samples_per_second"] > 0 for record in train_records)
     assert all(record["optimizer_steps_per_second"] > 0 for record in train_records)
-    if model_type == "single_token_jepa":
+    if model_type == "proposed":
         assert all("feature_std" in record for record in train_records)

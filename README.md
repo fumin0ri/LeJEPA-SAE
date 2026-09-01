@@ -1,44 +1,36 @@
 # LeJEPA-SAE
 
-Reconstruction-free sparse feature discovery from frozen LLM residual streams. The proposed
-model transfers LeVJEPA-style token dropping and CLS invariance to 10-token LLM activation
-windows, then replaces Gaussian distribution matching with a rectified-Gaussian RDMReg target.
+Reconstruction-free sparse feature discovery from individual LLM residual activations. The
+proposed model is the single-token dimension-mask JEPA; this repository contains no multi-token
+Transformer/CLS model.
 
-The implementation is intentionally split into two GPU phases so Pythia-6.9B and the trainable
-model never need to occupy a 24 GB RTX 4090 at the same time.
+## Proposed model
 
-## Method
-
-For a frozen block output `H ∈ R^(10×4096)`, the global view contains all ten residual vectors.
-Each of four local views independently retains `k=3` tokens. Dropped tokens are actually removed
-before the encoder; they are not zero-masked. Each retained token keeps its original position in
-the 0–9 window.
-
-All views share:
+For one frozen residual activation `h_t ∈ R^4096`, the global view is complete and each of four
+local views retains an independently sampled, exact half of its coordinates. The shared encoder is:
 
 ```text
-residuals → LayerNorm → 4096→256 projection → original position embedding
-          → prepend CLS → 3-layer/4-head Transformer
-          → CLS → 256→8192 sparse head → ReLU → z
+h_t → subtract learned pre-bias → exact coordinate mask → inverted-mask scaling
+    → Linear(4096, 8192) → ReLU → z
 ```
 
-In causal mode, residual tokens see only prior residual tokens and cannot see CLS, while CLS sees
-the complete retained span. Both global and local branches receive gradients. There is no target
-encoder, stop-gradient, decoder, token ID input, or reconstruction loss in the proposed model.
+Missing coordinates are therefore filled with the learned pre-bias and become zero after
+centering. The global and four local views are encoded in one batched Linear call. There is no
+Transformer, CLS token, decoder, target encoder, or stop-gradient.
 
 The objective is:
 
 ```text
-L = mean_v MSE(z_global, z_local_v) + λ · mean_views RDMReg(z_view)
+L = 25 · mean_v MSE(z_global, z_local_v) + 125 · mean_views RDMReg(z_view)
 ```
 
-RDMReg samples an equally shaped target from `ReLU(N(μ, σ²))`, choosing `μ/σ` so its expected
-active fraction is exactly the configured value (10% by default). It compares empirical sorted
-projections along 32 random unit directions, i.e. a sliced 2-Wasserstein loss.
+RDMReg follows Rectified LpJEPA: every view is matched to an independent
+`ReLU(Laplace(0, 1/√2))` target with 8192 shared random unit projections. Projection matmul is
+mixed precision; sorting and loss reduction are float32.
 
 ## Environment
 
-Target: Linux over SSH, Python 3.10+, CUDA 12.1, PyTorch 2.5.1, one RTX 4090.
+Target: Python 3.10+, CUDA 12.1, PyTorch 2.5.1, one RTX 4090.
 
 ```bash
 git clone https://github.com/fumin0ri/LeJEPA-SAE.git
@@ -50,37 +42,18 @@ pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 pip install -e '.[dev]'
 ```
 
-Check the runtime before a long extraction:
+## 1. Extract Pythia residual activations
 
-```bash
-python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name())"
-```
-
-## 1. Extract the exact residual hook point
-
-The extractor loads `AutoModel` (not the LM head), freezes it, and hooks the zero-based Pythia
-block output. The default corpus is the standard (non-deduplicated) The Pile, matching
-`EleutherAI/pythia-6.9b` rather than the `-deduped` model family.
-
-The practical single-workstation preset uses EleutherAI's official 5M-row random sample of the
-Pythia-tokenized standard Pile. It consumes the existing `Tokens` IDs directly, avoiding a
-tokenization mismatch:
+The default corpus is EleutherAI's official random sample of the standard, non-deduplicated Pile:
 
 ```bash
 bash scripts/extract_the_pile.sh
 ```
 
-Each sampled source sequence contains 64 Pythia tokens. The preset extracts 10,000 sequences
-(640k tokens and about 4.9 GiB of bf16 activations). Set `MAX_SEQUENCES=100000` to scale it to
-6.4M tokens and about 49 GiB. The sampled dataset calls the standard, non-deduplicated variant `duped`:
-`EleutherAI/pile-duped-pythia-random-sampled`.
-The extraction script pins its current dataset commit instead of following a mutable `main`.
+The extractor hooks zero-based Pythia block output 16 and writes bf16 activations plus token IDs.
+The manifest uses `minimum_window_size: 1`; every training and evaluation sample is one token.
 
-Each sampled 64-token source sequence is hash-assigned before segmentation, so its
-adjacent windows cannot cross splits. The random-sample table does not expose original Pile
-document IDs, however, so strict original-document isolation cannot be proven in this mode. For
-that requirement, point the extractor at locally obtained raw Pile JSONL shards, where one row is
-one original document:
+For locally stored raw Pile shards:
 
 ```bash
 lejepa-extract \
@@ -91,193 +64,81 @@ lejepa-extract \
   --model EleutherAI/pythia-6.9b \
   --layer 16 \
   --context-length 512 \
-  --window-size 10 \
+  --window-size 1 \
   --dtype bfloat16 \
   --output-dir data/the-pile/pythia-6.9b/layer-16
 ```
 
-Raw-document mode assigns each row to train/validation/test by a stable content hash before it is
-segmented. Consequently adjacent windows and all context segments from one document remain in one
-split. Review the licenses and access terms of every Pile component before obtaining or using the
-raw corpus.
-
-Use the same `block_output:16` manifest for every method. The activation shards contain residuals
-and token IDs; token IDs are retained only for decoding evaluation examples and never enter an
-interpretation model. Long documents are evaluated in independent 512-token causal segments.
-
-For a smoke extraction, add `--max-documents 100`. Storage is approximately 8 GB per 1 million
-tokens at width 4096 in bf16. Change `--shard-tokens` to trade file size for loader cache pressure.
+Extraction refuses to overwrite an existing output directory. Choose a new directory or move the
+old extraction before rerunning with different settings.
 
 ## 2. Train the proposed model
 
 ```bash
-lejepa-train --config configs/pythia-6.9b-layer16.yaml
+bash scripts/run_proposed.sh
 ```
 
-The default microbatch is 64 windows with eight accumulation steps (effective batch 512). On an
-otherwise occupied 4090, lower the microbatch without changing the effective batch:
+The pilot preset uses batch 512, no gradient accumulation, 10,000 steps, and a fresh output at
+`runs/the-pile/pythia-6.9b-layer16/proposed`. If batch 512 is out of memory, preserve the effective
+batch in this order:
 
 ```bash
-lejepa-train --config configs/pythia-6.9b-layer16.yaml \
-  --set train.batch_size=32 \
-  --set train.gradient_accumulation_steps=16
+BATCH_SIZE=256 GRADIENT_ACCUMULATION_STEPS=2 bash scripts/run_proposed.sh
+BATCH_SIZE=128 GRADIENT_ACCUMULATION_STEPS=4 bash scripts/run_proposed.sh
 ```
 
-Training writes the fully resolved config, append-only JSONL metrics, periodic restartable
-checkpoints, and a `latest.json` pointer. A healthy run should show falling invariance loss,
-nonzero mean feature standard deviation, and active fraction moving toward 0.10.
+`MAX_STEPS` and `EVAL_BATCHES` are also environment overrides. Training logs core losses every
+batch, collapse diagnostics at log steps, interval throughput, and CUDA peak memory.
 
-## 3. Retention sweep and required baselines
+The optional single-token reconstruction baselines remain available:
 
 ```bash
-bash scripts/run_retention_sweep.sh
-bash scripts/run_baselines.sh
+bash scripts/run_comparison.sh
 ```
 
-The retention sweep runs `k ∈ {1,2,3,5,8,10}`. Baseline behavior is selected with `model.type`:
-
-| Type | Unit | Objective | Dropping | Distribution |
-|---|---:|---|---:|---|
-| `standard_sae` | 1 token | reconstruction + L1 | no | none |
-| `window_autoencoder` | 10 tokens | reconstruction + L1 | no | none |
-| `sparse_jepa_full_view` | 10 tokens | invariance + RDMReg | 10/10 | rectified Gaussian |
-| `jepa_sigreg` | 10 tokens | invariance + distribution | yes | Gaussian |
-| `proposed` | 10 tokens | invariance + RDMReg | yes | rectified Gaussian |
-
-The window autoencoder uses the same small Transformer encoder and a capacity-controlled
-factorized Transformer decoder, avoiding a confounding 335M-parameter dense 8192→(10×4096)
-decoder.
-
-### Single-token dimension-mask JEPA stabilization
-
-This experiment uses one residual vector at a time and gives the JEPA model a
-`4096→8192→ReLU` sparse encoder. Four local views each retain an independently sampled, exact
-half of the residual coordinates. Masking happens after subtraction of the learned pre-bias, so a
-missing raw coordinate is filled with that pre-bias rather than an out-of-distribution raw zero.
-Retained centered values use inverted-mask scaling (`1/q`, or 2× at the default `q=0.5`). No
-Transformer, CLS token, decoder, or stop-gradient is present in `single_token_jepa`.
-
-The stabilization preset follows Rectified LpJEPA: it matches every view to
-`ReLU(Laplace(0, 1/sqrt(2)))`, shares 8192 random unit projections across the complete global
-view and four masked local views, and independently samples the target for each view. The
-invariance and RDMReg weights are 25 and 125. The encoder processes all five views in one
-batched Linear call, and RDMReg projects all views in one operation while sorting each view only
-along its 512-sample batch dimension. The 10,000-step pilot therefore uses `512×1` instead of
-gradient accumulation, giving RDMReg a larger empirical distribution as well as reducing launch
-overhead.
-
-Training logs separate `global_distribution` and `local_distribution`, and include global/local
-active fractions, feature standard deviations, batch dead-feature fractions, and the paper's L0
-and L1 sparsity metrics. The expensive collapse diagnostics are computed at log steps and during
-validation, rather than every training batch. Train records also include interval
-`samples_per_second`, `optimizer_steps_per_second`, `cuda_peak_allocated_mib`, and
-`cuda_peak_reserved_mib`. Start this run from a fresh initialization instead of resuming a
-collapsed checkpoint.
-
-The default pilot command is:
-
-```bash
-bash scripts/run_single_token_jepa.sh
-```
-
-If `512×1` is out of memory on the RTX 4090, keep the effective batch at 512 and use the formal
-fallbacks in this order:
-
-```bash
-BATCH_SIZE=256 GRADIENT_ACCUMULATION_STEPS=2 bash scripts/run_single_token_jepa.sh
-BATCH_SIZE=128 GRADIENT_ACCUMULATION_STEPS=4 bash scripts/run_single_token_jepa.sh
-```
-
-The first positional argument can override the config path and the second the output directory.
-`MAX_STEPS` and `EVAL_BATCHES` are also available as environment overrides. For a quick
-plumbing-only smoke test, override the projection count and step count directly:
-
-```bash
-lejepa-train \
-  --config configs/pythia-6.9b-layer16-single-token.yaml \
-  --set loss.rdm_projections=512 \
-  --set train.batch_size=32 \
-  --set train.max_steps=100 \
-  --set train.output_dir=runs/the-pile/pythia-6.9b-layer16/single-token/smoke-p512
-```
-
-After the JEPA run is demonstrably healthy, the three-way controlled comparison remains available:
-
-```bash
-bash scripts/run_single_token_comparison.sh
-```
-
-| Type | Input during training | Objective |
+| Type | Input | Objective |
 |---|---|---|
-| `standard_sae` | complete `h_t` | full reconstruction + L1 |
-| `dimension_denoising_sae` | four independent half-coordinate views | reconstruct complete `h_t` + L1 |
-| `single_token_jepa` | complete global + four half-coordinate local views | invariance + rectified RDMReg |
+| `proposed` | complete global + four half-coordinate local views | invariance + RDMReg |
+| `standard_sae` | complete token | reconstruction + L1 |
+| `dimension_denoising_sae` | four half-coordinate views | full-token reconstruction + L1 |
 
-All three read the same activation shards with `window_size: 1`; their runs are written under the
-separate `runs/the-pile/pythia-6.9b-layer16/single-token/` directory. Change the retained fraction
-without changing the encoder interface with, for example,
-`--set model.dimension_keep_fraction=0.25`.
-
-Evaluate any run with its resolved config and checkpoint, for example:
+## 3. Evaluate and visualize
 
 ```bash
 lejepa-evaluate \
-  --config runs/the-pile/pythia-6.9b-layer16/single-token/pilot-paper-rdmreg-p1-mu0-b512/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16/single-token/pilot-paper-rdmreg-p1-mu0-b512/checkpoint-00010000.pt \
-  --max-windows 10000 \
+  --config runs/the-pile/pythia-6.9b-layer16/proposed/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed/checkpoint-00010000.pt \
+  --max-tokens 10000 \
   --top-k 20 \
-  --output-dir runs/the-pile/pythia-6.9b-layer16/single-token/pilot-paper-rdmreg-p1-mu0-b512/evaluation
+  --output-dir runs/the-pile/pythia-6.9b-layer16/proposed/evaluation
 ```
 
-All models report active fraction, dead features, feature variance, and top activating tokens.
-`single_token_jepa` additionally reports global-local MSE and feature-support Jaccard;
-`dimension_denoising_sae` reports full-input and masked-input reconstruction MSE.
+Open `evaluation/index.html` first. Evaluation writes:
 
-Bidirectional and sparsity ablations require only scalar overrides:
+- `index.html`: metric cards, collapse status, feature histograms, and searchable top activations
+- `summary.md`: compact core-metric table and the 20 highest-variance features
+- `feature_diagnostics.svg`: active-rate, standard-deviation, and maximum-activation distributions
+- `feature_metrics.csv`: per-feature active rate, mean, standard deviation, and maximum
+- `metrics.json`: machine-readable aggregate metrics
+- `top_tokens.jsonl`: all requested top decoded token examples for every feature
 
-```bash
-lejepa-train --config configs/pythia-6.9b-layer16.yaml \
-  --set model.attention=bidirectional \
-  --set loss.target_active_fraction=0.05 \
-  --set train.output_dir=runs/bidirectional-active05
-```
+The proposed model reports active fraction, dead-feature fraction, feature variance,
+global-local MSE, and feature-support Jaccard. Optionally pass `--concept-labels labels.json`, where
+the JSON maps `document_id` to a concept label, to add merging/splitting proxies.
 
-## 4. Evaluate semantics and drop robustness
+## 4. Local gradient intervention
 
-```bash
-lejepa-evaluate \
-  --config runs/the-pile/pythia-6.9b-layer16/proposed-k3/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed-k3/checkpoint-00100000.pt \
-  --max-windows 10000 \
-  --top-k 20 \
-  --output-dir runs/the-pile/pythia-6.9b-layer16/proposed-k3/evaluation
-```
-
-Outputs include feature sparsity/deadness, global-local MSE, exact-support Jaccard, and a JSONL
-file of top activating decoded spans for monosemanticity review. Optionally pass
-`--concept-labels labels.json`, where the JSON maps `document_id` to a concept label. This adds
-dominant-concept consistency, concepts-per-feature (merging proxy), and features-per-concept
-(splitting proxy).
-
-## 5. Local gradient intervention
-
-The proposed model has no decoder vector. The supplied intervention is therefore explicitly
-sample-dependent and should not be presented as SAE-style global controllability:
+The proposed model has no decoder vector, so interventions are explicitly sample-dependent:
 
 ```bash
 lejepa-intervene \
-  --config runs/the-pile/pythia-6.9b-layer16/proposed-k3/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed-k3/checkpoint-00100000.pt \
-  --window-index 42 \
+  --config runs/the-pile/pythia-6.9b-layer16/proposed/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed/checkpoint-00010000.pt \
+  --token-index 42 \
   --feature-index 123 \
   --alpha 5 \
-  --token-position 7 \
-  --output runs/interventions/feature-123-window-42.pt
+  --output runs/interventions/feature-123-token-42.pt
 ```
-
-The output stores the original residuals, normalized local gradient direction, modified
-residuals, token IDs, and metadata. Inject `modified_residuals` at the same block-output hook when
-measuring downstream causal effects.
 
 ## Tests
 
@@ -286,6 +147,6 @@ pytest
 ruff check .
 ```
 
-Tests cover true token removal and original-position retention, the asymmetric CLS attention
-mask, target sparsity calibration, document split isolation, shard window boundaries, every model
-type, and a backward training step.
+Tests cover exact coordinate masking, pre-bias filling, inverted-mask scaling, vectorized
+five-view encoding and RDMReg, paper target sampling, training/checkpoints, data isolation, and all
+evaluation report artifacts.

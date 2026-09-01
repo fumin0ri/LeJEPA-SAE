@@ -1,32 +1,27 @@
 data:
   activation_dir: data/the-pile/pythia-6.9b/layer-16
-  window_size: 10
+  window_size: 1
   train_stride: 1
-  eval_stride: 10
+  eval_stride: 1
   num_workers: 4
   cache_shards_per_worker: 1
 
 model:
   type: proposed
   d_llm: 4096
-  d_encoder: 256
-  num_layers: 3
-  num_heads: 4
-  mlp_ratio: 4
   feature_dim: 8192
-  dropout: 0.0
-  attention: causal
   num_local_views: 4
-  local_tokens: 3
   dimension_keep_fraction: 0.5
-  sparse_bias: 0.0
 
 loss:
-  invariance_weight: 1.0
-  lambda_rdm: 1.0
-  rdm_projections: 32
-  target_active_fraction: 0.10
-  target_sigma: 1.0
+  invariance_weight: 25.0
+  lambda_rdm: 125.0
+  rdm_projections: 8192
+  target_distribution: rectified_lp_distribution
+  lp_norm_parameter: 1.0
+  mean_shift_value: 0.0
+  mode_of_sigma: sigma_GN
+  projection_vectors_type: random
   reconstruction_weight: 1.0
   sae_l1_coefficient: 0.001
 
@@ -34,16 +29,16 @@ train:
   seed: 42
   device: cuda
   precision: bfloat16
-  batch_size: 64
-  gradient_accumulation_steps: 8
-  max_steps: 100000
+  batch_size: 512
+  gradient_accumulation_steps: 1
+  max_steps: 10000
   learning_rate: 0.0001
   weight_decay: 0.01
   warmup_steps: 2000
   max_grad_norm: 1.0
   log_every: 20
   eval_every: 1000
-  checkpoint_every: 5000
-  eval_batches: 50
-  output_dir: runs/the-pile/pythia-6.9b-layer16/proposed-k3
+  checkpoint_every: 10000
+  eval_batches: 12
+  output_dir: runs/the-pile/pythia-6.9b-layer16/proposed
   resume_from: null

@@ -142,7 +142,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--revision", default="main")
     parser.add_argument("--layer", type=int, default=16, help="Zero-based block index")
     parser.add_argument("--context-length", type=int, default=512)
-    parser.add_argument("--window-size", type=int, default=10)
+    parser.add_argument("--window-size", type=int, default=1)
     parser.add_argument("--shard-tokens", type=int, default=50_000)
     parser.add_argument("--validation-fraction", type=float, default=0.01)
     parser.add_argument("--test-fraction", type=float, default=0.01)

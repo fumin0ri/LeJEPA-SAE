@@ -9,23 +9,18 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-from .config import TOKEN_VIEW_MODEL_TYPES, ExperimentConfig, load_config
+from .config import ExperimentConfig, load_config
 from .data import ActivationWindowDataset
 from .models import build_model
+from .reporting import write_evaluation_report
 from .train import autocast_context, seed_everything
-from .views import full_view, sample_dimension_masks, sample_local_views
+from .views import sample_dimension_masks
 
 
-def span_features(model, residuals: torch.Tensor, config: ExperimentConfig) -> torch.Tensor:
-    if config.model.type == "standard_sae":
-        token_features = model(residuals).features
-        return token_features.max(dim=1).values
-    if config.model.type in {"single_token_jepa", "dimension_denoising_sae"}:
-        if residuals.shape[1] != 1:
-            raise ValueError("dimension-view evaluation requires one-token windows")
-        return model(residuals[:, 0]).features
-    complete = full_view(residuals)
-    return model(complete.residuals, complete.positions).features
+def encode_features(model, residuals: torch.Tensor) -> torch.Tensor:
+    if residuals.shape[1] != 1:
+        raise ValueError("evaluation requires one-token windows")
+    return model(residuals[:, 0]).features
 
 
 def load_model(config: ExperimentConfig, checkpoint_path: str | Path, device: str):
@@ -58,7 +53,7 @@ def evaluate(
     config: ExperimentConfig,
     checkpoint_path: str | Path,
     output_dir: str | Path,
-    max_windows: int,
+    max_tokens: int,
     top_k: int,
     support_epsilon: float,
     concept_labels_path: str | None = None,
@@ -102,14 +97,14 @@ def evaluate(
         concept_labels = json.loads(Path(concept_labels_path).read_text(encoding="utf-8"))
 
     for batch in loader:
-        if evaluated >= max_windows:
+        if evaluated >= max_tokens:
             break
-        remaining = max_windows - evaluated
+        remaining = max_tokens - evaluated
         residuals = batch["residuals"][:remaining].to(device, non_blocking=True)
         batch_token_ids = batch["token_ids"][:remaining]
         batch_document_ids = list(batch["document_id"][:remaining])
         with autocast_context(config):
-            features = span_features(model, residuals, config)
+            features = encode_features(model, residuals)
         feature_cpu = features.float().cpu()
         support = feature_cpu > support_epsilon
         count = features.shape[0]
@@ -124,22 +119,7 @@ def evaluate(
         token_rows.extend(batch_token_ids.cpu())
         document_ids.extend(batch_document_ids)
 
-        if config.model.type in TOKEN_VIEW_MODEL_TYPES:
-            complete = full_view(residuals)
-            local = sample_local_views(residuals, 1, config.model.local_tokens)[0]
-            with autocast_context(config):
-                global_features = model(complete.residuals, complete.positions).features.float()
-                local_features = model(local.residuals, local.positions).features.float()
-            invariance_total += torch.nn.functional.mse_loss(
-                global_features, local_features, reduction="sum"
-            ).item() / feature_dim
-            global_support = global_features > support_epsilon
-            local_support = local_features > support_epsilon
-            intersection = (global_support & local_support).sum(dim=1)
-            union = (global_support | local_support).sum(dim=1)
-            jaccard_total += (intersection / union.clamp_min(1)).sum().item()
-
-        elif config.model.type == "single_token_jepa":
+        if config.model.type == "proposed":
             token_residuals = residuals[:, 0]
             dimension_mask = sample_dimension_masks(
                 token_residuals, 1, config.model.dimension_keep_fraction
@@ -177,13 +157,12 @@ def evaluate(
 
         elif config.model.type == "standard_sae":
             with autocast_context(config):
-                full_output = model(residuals)
-            elements_per_window = residuals.shape[1] * config.model.d_llm
+                full_output = model(residuals[:, 0])
             full_reconstruction_total += torch.nn.functional.mse_loss(
                 full_output.reconstruction.float(),
-                residuals.float(),
+                residuals[:, 0].float(),
                 reduction="sum",
-            ).item() / elements_per_window
+            ).item() / config.model.d_llm
 
         for row, document_id in enumerate(batch_document_ids):
             label = concept_labels.get(str(document_id))
@@ -193,16 +172,16 @@ def evaluate(
         evaluated += count
 
     if evaluated == 0:
-        raise ValueError("No test windows were evaluated")
+        raise ValueError("No test tokens were evaluated")
     mean = value_sum / evaluated
     variance = (square_sum / evaluated - mean.square()).clamp_min(0)
     result = {
-        "windows": float(evaluated),
+        "tokens": float(evaluated),
         "mean_active_fraction": float(active_sum.sum() / (evaluated * feature_dim)),
         "dead_feature_fraction": float((maxima <= support_epsilon).float().mean()),
         "mean_feature_std": float(variance.sqrt().mean()),
     }
-    if config.model.type in {*TOKEN_VIEW_MODEL_TYPES, "single_token_jepa"}:
+    if config.model.type == "proposed":
         result["global_local_mse"] = invariance_total / evaluated
         result["support_jaccard"] = jaccard_total / evaluated
     if config.model.type in {"standard_sae", "dimension_denoising_sae"}:
@@ -216,7 +195,8 @@ def evaluate(
     tokenizer = AutoTokenizer.from_pretrained(
         manifest["model"], revision=manifest.get("revision", "main")
     )
-    with (output / "top_spans.jsonl").open("w", encoding="utf-8") as handle:
+    top_records = []
+    with (output / "top_tokens.jsonl").open("w", encoding="utf-8") as handle:
         for feature_index in range(feature_dim):
             examples = []
             for score, row_index in zip(
@@ -233,6 +213,7 @@ def evaluate(
                     }
                 )
             record = {"feature": feature_index, "examples": examples}
+            top_records.append(record)
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     if concept_active:
@@ -266,17 +247,30 @@ def evaluate(
     (output / "metrics.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    active_rates = active_sum / evaluated
+    feature_std = variance.sqrt()
+    feature_rows = [
+        {
+            "feature": feature_index,
+            "active_fraction": float(active_rates[feature_index]),
+            "mean": float(mean[feature_index]),
+            "std": float(feature_std[feature_index]),
+            "maximum": float(maxima[feature_index]),
+        }
+        for feature_index in range(feature_dim)
+    ]
+    write_evaluation_report(output, result, feature_rows, top_records)
     return result
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate sparse features and token-drop robustness"
+        description="Evaluate and visualize single-token sparse features"
     )
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--max-windows", type=int, default=10_000)
+    parser.add_argument("--max-tokens", type=int, default=10_000)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--support-epsilon", type=float, default=0.0)
     parser.add_argument("--concept-labels", default=None)
@@ -290,7 +284,7 @@ def main() -> None:
         config,
         args.checkpoint,
         args.output_dir,
-        args.max_windows,
+        args.max_tokens,
         args.top_k,
         args.support_epsilon,
         args.concept_labels,

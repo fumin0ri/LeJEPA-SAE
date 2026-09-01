@@ -24,15 +24,9 @@ from .data import (
     ShardAwareRandomSampler,
     validate_document_disjointness,
 )
-from .losses import (
-    gaussian_distribution_regularization,
-    invariance_loss,
-    l1_sparsity_metric,
-    rdm_regularization,
-    rectified_lp_rdm_regularization,
-)
+from .losses import l1_sparsity_metric, rectified_lp_rdm_regularization
 from .models import build_model
-from .views import full_view, sample_dimension_masks, sample_local_views
+from .views import sample_dimension_masks
 
 
 def seed_everything(seed: int) -> None:
@@ -87,99 +81,11 @@ def compute_loss(
     include_diagnostics: bool = True,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     model_type = config.model.type
-    complete = full_view(residuals)
-
-    if model_type in {"single_token_jepa", "dimension_denoising_sae"}:
-        if residuals.shape[1] != 1:
-            raise ValueError(f"{model_type} requires one-token residual windows")
-        token_residuals = residuals[:, 0]
-        dimension_masks = sample_dimension_masks(
-            token_residuals,
-            config.model.num_local_views,
-            config.model.dimension_keep_fraction,
-        )
-
-        if model_type == "dimension_denoising_sae":
-            residual_views, masks = stack_dimension_views(
-                token_residuals, dimension_masks, include_global=False
-            )
-            output = model(residual_views, masks)
-            target = token_residuals.unsqueeze(0).expand_as(output.reconstruction)
-            reconstruction = F.mse_loss(output.reconstruction.float(), target.float())
-            sparsity = output.features.float().abs().mean()
-            loss = config.loss.reconstruction_weight * reconstruction
-            loss = loss + config.loss.sae_l1_coefficient * sparsity
-            flattened = output.features.flatten(0, 1)
-            return loss, {
-                "loss": loss.detach(),
-                "reconstruction": reconstruction.detach(),
-                "l1": sparsity.detach(),
-                "active_fraction": (flattened > 0).float().mean().detach(),
-            }
-
-        residual_views, masks = stack_dimension_views(
-            token_residuals, dimension_masks, include_global=True
-        )
-        feature_views = model(residual_views, masks).features
-        global_features = feature_views[0]
-        local_features = feature_views[1:]
-        invariance = F.mse_loss(
-            local_features,
-            global_features.unsqueeze(0).expand_as(local_features),
-        )
-        distribution, view_distribution_losses = rectified_lp_rdm_regularization(
-            feature_views,
-            config.loss.rdm_projections,
-            config.loss.lp_norm_parameter,
-            config.loss.mean_shift_value,
-        )
-        loss = (
-            config.loss.invariance_weight * invariance
-            + config.loss.lambda_rdm * distribution
-        )
-        if not torch.isfinite(loss):
-            raise FloatingPointError("single_token_jepa produced a non-finite loss")
-        metrics = {
-            "loss": loss.detach(),
-            "invariance": invariance.detach(),
-            "distribution": distribution.detach(),
-            "global_distribution": view_distribution_losses[0].detach(),
-            "local_distribution": torch.stack(view_distribution_losses[1:]).mean().detach(),
-        }
-        if not include_diagnostics:
-            return loss, metrics
-
-        flattened = feature_views.flatten(0, 1).detach()
-        flattened_locals = local_features.flatten(0, 1).detach()
-        global_detached = global_features.detach()
-        global_float = global_detached.float()
-        local_float = flattened_locals.float()
-        metrics.update(
-            {
-                "active_fraction": (flattened > 0).float().mean().detach(),
-                "l0_sparsity": (flattened > 0).float().mean().detach(),
-                "l1_sparsity": l1_sparsity_metric(flattened).detach(),
-                "global_active_fraction": (global_detached > 0).float().mean(),
-                "local_active_fraction": (flattened_locals > 0).float().mean().detach(),
-                "feature_std": flattened.float().std(dim=0, unbiased=False).mean(),
-                "global_feature_std": global_float.std(dim=0, unbiased=False).mean(),
-                "local_feature_std": local_float.std(dim=0, unbiased=False).mean(),
-                "global_dead_feature_fraction": (
-                    global_detached.amax(dim=0) <= 0
-                ).float().mean(),
-                "local_dead_feature_fraction": (
-                    flattened_locals.amax(dim=0) <= 0
-                ).float().mean().detach(),
-            }
-        )
-        return loss, metrics
+    if residuals.shape[1] != 1:
+        raise ValueError(f"{model_type} requires one-token residual windows")
+    token_residuals = residuals[:, 0]
 
     if model_type == "standard_sae":
-        batch_indices = torch.arange(residuals.shape[0], device=residuals.device)
-        token_indices = torch.randint(
-            residuals.shape[1], (residuals.shape[0],), device=residuals.device
-        )
-        token_residuals = residuals[batch_indices, token_indices]
         output = model(token_residuals)
         reconstruction = F.mse_loss(
             output.reconstruction.float(), token_residuals.float()
@@ -194,54 +100,82 @@ def compute_loss(
             "active_fraction": (output.features > 0).float().mean().detach(),
         }
 
-    if model_type == "window_autoencoder":
-        output = model(complete.residuals, complete.positions)
-        reconstruction = F.mse_loss(output.reconstruction.float(), residuals.float())
+    dimension_masks = sample_dimension_masks(
+        token_residuals,
+        config.model.num_local_views,
+        config.model.dimension_keep_fraction,
+    )
+    if model_type == "dimension_denoising_sae":
+        residual_views, masks = stack_dimension_views(
+            token_residuals, dimension_masks, include_global=False
+        )
+        output = model(residual_views, masks)
+        target = token_residuals.unsqueeze(0).expand_as(output.reconstruction)
+        reconstruction = F.mse_loss(output.reconstruction.float(), target.float())
         sparsity = output.features.float().abs().mean()
         loss = config.loss.reconstruction_weight * reconstruction
         loss = loss + config.loss.sae_l1_coefficient * sparsity
+        flattened = output.features.flatten(0, 1)
         return loss, {
             "loss": loss.detach(),
             "reconstruction": reconstruction.detach(),
             "l1": sparsity.detach(),
-            "active_fraction": (output.features > 0).float().mean().detach(),
+            "active_fraction": (flattened > 0).float().mean().detach(),
         }
 
-    global_features = model(complete.residuals, complete.positions).features
-    local_views = sample_local_views(
-        residuals,
-        config.model.num_local_views,
-        config.model.local_tokens,
+    residual_views, masks = stack_dimension_views(
+        token_residuals, dimension_masks, include_global=True
     )
-    local_features = [model(view.residuals, view.positions).features for view in local_views]
-    invariance = invariance_loss(global_features, local_features)
-
-    all_features = [global_features, *local_features]
-    if model_type == "jepa_sigreg":
-        distribution_losses = [
-            gaussian_distribution_regularization(features, config.loss.rdm_projections)
-            for features in all_features
-        ]
-    else:
-        distribution_losses = [
-            rdm_regularization(
-                features,
-                config.loss.rdm_projections,
-                config.loss.target_active_fraction,
-                config.loss.target_sigma,
-            )
-            for features in all_features
-        ]
-    distribution = torch.stack(distribution_losses).mean()
+    feature_views = model(residual_views, masks).features
+    global_features = feature_views[0]
+    local_features = feature_views[1:]
+    invariance = F.mse_loss(
+        local_features,
+        global_features.unsqueeze(0).expand_as(local_features),
+    )
+    distribution, view_distribution_losses = rectified_lp_rdm_regularization(
+        feature_views,
+        config.loss.rdm_projections,
+        config.loss.lp_norm_parameter,
+        config.loss.mean_shift_value,
+    )
     loss = config.loss.invariance_weight * invariance + config.loss.lambda_rdm * distribution
-    flattened = torch.cat(all_features, dim=0)
-    return loss, {
+    if not torch.isfinite(loss):
+        raise FloatingPointError("proposed model produced a non-finite loss")
+    metrics = {
         "loss": loss.detach(),
         "invariance": invariance.detach(),
         "distribution": distribution.detach(),
-        "active_fraction": (flattened > 0).float().mean().detach(),
-        "feature_std": flattened.float().std(dim=0).mean().detach(),
+        "global_distribution": view_distribution_losses[0].detach(),
+        "local_distribution": torch.stack(view_distribution_losses[1:]).mean().detach(),
     }
+    if not include_diagnostics:
+        return loss, metrics
+
+    flattened = feature_views.flatten(0, 1).detach()
+    flattened_locals = local_features.flatten(0, 1).detach()
+    global_detached = global_features.detach()
+    global_float = global_detached.float()
+    local_float = flattened_locals.float()
+    metrics.update(
+        {
+            "active_fraction": (flattened > 0).float().mean().detach(),
+            "l0_sparsity": (flattened > 0).float().mean().detach(),
+            "l1_sparsity": l1_sparsity_metric(flattened).detach(),
+            "global_active_fraction": (global_detached > 0).float().mean(),
+            "local_active_fraction": (flattened_locals > 0).float().mean().detach(),
+            "feature_std": flattened.float().std(dim=0, unbiased=False).mean(),
+            "global_feature_std": global_float.std(dim=0, unbiased=False).mean(),
+            "local_feature_std": local_float.std(dim=0, unbiased=False).mean(),
+            "global_dead_feature_fraction": (
+                global_detached.amax(dim=0) <= 0
+            ).float().mean(),
+            "local_dead_feature_fraction": (
+                flattened_locals.amax(dim=0) <= 0
+            ).float().mean().detach(),
+        }
+    )
+    return loss, metrics
 
 
 def make_loader(

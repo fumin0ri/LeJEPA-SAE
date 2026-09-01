@@ -3,20 +3,16 @@
 from .config import ExperimentConfig, load_config
 from .models import (
     DimensionDenoisingSAE,
-    SingleTokenSparseJEPA,
-    SparseJEPA,
+    ProposedModel,
     StandardSAE,
-    WindowAutoencoder,
     build_model,
 )
 
 __all__ = [
     "ExperimentConfig",
     "DimensionDenoisingSAE",
-    "SingleTokenSparseJEPA",
-    "SparseJEPA",
+    "ProposedModel",
     "StandardSAE",
-    "WindowAutoencoder",
     "build_model",
     "load_config",
 ]

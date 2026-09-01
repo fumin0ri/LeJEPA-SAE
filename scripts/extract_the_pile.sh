@@ -15,7 +15,7 @@ lejepa-extract \
   --revision main \
   --layer 16 \
   --context-length 512 \
-  --window-size 10 \
+  --window-size 1 \
   --dtype bfloat16 \
   --shard-tokens 50000 \
   --max-documents "$max_sequences" \
