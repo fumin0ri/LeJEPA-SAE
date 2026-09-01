@@ -12,7 +12,7 @@ MODEL_TYPES = {"proposed", "standard_sae", "dimension_denoising_sae"}
 
 @dataclass
 class DataConfig:
-    activation_dir: str = "data/pythia-6.9b/layer-16"
+    activation_dir: str = "data/the-pile/pythia-6.9b/layer-16-ctx1024-100m"
     window_size: int = 1
     train_stride: int = 1
     eval_stride: int = 1
@@ -61,7 +61,7 @@ class TrainConfig:
     eval_every: int = 1_000
     checkpoint_every: int = 10_000
     eval_batches: int = 12
-    output_dir: str = "runs/the-pile/pythia-6.9b-layer16/proposed"
+    output_dir: str = "runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed"
     resume_from: str | None = None
 
 

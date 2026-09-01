@@ -117,6 +117,17 @@ def _document_identifier(
     return digest
 
 
+def _truncate_to_source_token_budget(
+    token_ids: torch.Tensor,
+    source_tokens_processed: int,
+    max_source_tokens: int | None,
+) -> torch.Tensor:
+    if max_source_tokens is None:
+        return token_ids
+    remaining = max_source_tokens - source_tokens_processed
+    return token_ids[: max(remaining, 0)]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract split-safe Pythia residual shards")
     parser.add_argument("--dataset", required=True, help="Hugging Face dataset name")
@@ -138,10 +149,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--id-column", default=None)
     parser.add_argument("--streaming", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-documents", type=int, default=None)
+    parser.add_argument(
+        "--max-source-tokens",
+        type=int,
+        default=None,
+        help="Stop after this many tokenized source tokens (the final source unit is truncated)",
+    )
     parser.add_argument("--model", default="EleutherAI/pythia-6.9b")
     parser.add_argument("--revision", default="main")
     parser.add_argument("--layer", type=int, default=16, help="Zero-based block index")
-    parser.add_argument("--context-length", type=int, default=512)
+    parser.add_argument("--context-length", type=int, default=1024)
     parser.add_argument("--window-size", type=int, default=1)
     parser.add_argument("--shard-tokens", type=int, default=50_000)
     parser.add_argument("--validation-fraction", type=float, default=0.01)
@@ -160,6 +177,8 @@ def extract(args: argparse.Namespace) -> Path:
         raise FileExistsError(f"Refusing to overwrite existing extraction: {output_dir}")
     if args.context_length < args.window_size:
         raise ValueError("context-length must be at least window-size")
+    if args.max_source_tokens is not None and args.max_source_tokens <= 0:
+        raise ValueError("max-source-tokens must be positive")
 
     dtype = getattr(torch, args.dtype)
     tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision)
@@ -192,10 +211,16 @@ def extract(args: argparse.Namespace) -> Path:
     writer = ShardWriter(output_dir, args.shard_tokens)
     counts: dict[str, int] = defaultdict(int)
     processed_documents = 0
+    source_tokens_processed = 0
     progress = tqdm(dataset, total=args.max_documents, desc="extracting documents")
     try:
         for index, example in enumerate(progress):
             if args.max_documents is not None and processed_documents >= args.max_documents:
+                break
+            if (
+                args.max_source_tokens is not None
+                and source_tokens_processed >= args.max_source_tokens
+            ):
                 break
             if args.token_ids_column:
                 raw_token_ids = example.get(args.token_ids_column)
@@ -216,6 +241,13 @@ def extract(args: argparse.Namespace) -> Path:
                     text, add_special_tokens=False, return_tensors="pt"
                 )
                 token_ids = token_ids["input_ids"][0]
+            if token_ids.numel() == 0:
+                continue
+            token_ids = _truncate_to_source_token_budget(
+                token_ids, source_tokens_processed, args.max_source_tokens
+            )
+            if token_ids.numel() == 0:
+                break
             document_id = _document_identifier(
                 example, identity, index, args.id_column
             )
@@ -243,8 +275,13 @@ def extract(args: argparse.Namespace) -> Path:
                 writer.add(split, activations, segment.cpu(), document_id, segment_index)
                 counts[split] += int(segment.numel())
                 segment_index += 1
+            source_tokens_processed += int(token_ids.numel())
             processed_documents += 1
-            progress.set_postfix(documents=processed_documents, tokens=sum(counts.values()))
+            progress.set_postfix(
+                documents=processed_documents,
+                source_tokens=source_tokens_processed,
+                activation_tokens=sum(counts.values()),
+            )
     finally:
         handle.remove()
 
@@ -274,6 +311,8 @@ def extract(args: argparse.Namespace) -> Path:
         "validation_fraction": args.validation_fraction,
         "test_fraction": args.test_fraction,
         "documents_processed": processed_documents,
+        "max_source_tokens": args.max_source_tokens,
+        "source_tokens_processed": source_tokens_processed,
         "tokens_by_split": dict(counts),
         "shards": shards,
     }

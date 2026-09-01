@@ -4,7 +4,7 @@ set -euo pipefail
 config="${1:-configs/pythia-6.9b-layer16.yaml}"
 axis_projections="${AXIS_PROJECTIONS:-512}"
 axis_weight="${AXIS_WEIGHT:-1.0}"
-output_dir="${2:-runs/the-pile/pythia-6.9b-layer16/proposed-axis$axis_projections}"
+output_dir="${2:-runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis$axis_projections}"
 batch_size="${BATCH_SIZE:-512}"
 gradient_accumulation_steps="${GRADIENT_ACCUMULATION_STEPS:-1}"
 max_steps="${MAX_STEPS:-10000}"

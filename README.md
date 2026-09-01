@@ -48,14 +48,27 @@ pip install -e '.[dev]'
 
 ## 1. Extract Pythia residual activations
 
-The default corpus is EleutherAI's official random sample of the standard, non-deduplicated Pile:
+The default extraction reads the local raw Pile shards, sends each document to Pythia in chunks of
+up to 1024 tokens, and stops at 100M tokenized source tokens:
 
 ```bash
 bash scripts/extract_the_pile.sh
 ```
 
-The extractor hooks zero-based Pythia block output 16 and writes bf16 activations plus token IDs.
-The manifest uses `minimum_window_size: 1`; every training and evaluation sample is one token.
+The default input glob is `/datasets/the-pile/train/*.jsonl.zst`. Override it and the token budget
+without editing the script:
+
+```bash
+DATA_FILES='/another/path/*.jsonl.zst' MAX_SOURCE_TOKENS=100000000 \
+  bash scripts/extract_the_pile.sh
+```
+
+The extractor hooks zero-based Pythia block output 16 and writes bf16 activations plus token IDs to
+`data/the-pile/pythia-6.9b/layer-16-ctx1024-100m`. The manifest records both the requested limit and
+the source-token count actually consumed. These are source-token presentations, not semantic corpus
+deduplication. At 100M tokens, width-4096 bf16 activations require about 763 GiB before filesystem
+overhead. The manifest uses `minimum_window_size: 1`; every training and evaluation sample is one
+token.
 
 For locally stored raw Pile shards:
 
@@ -67,10 +80,11 @@ lejepa-extract \
   --text-column text \
   --model EleutherAI/pythia-6.9b \
   --layer 16 \
-  --context-length 512 \
+  --context-length 1024 \
   --window-size 1 \
   --dtype bfloat16 \
-  --output-dir data/the-pile/pythia-6.9b/layer-16
+  --max-source-tokens 100000000 \
+  --output-dir data/the-pile/pythia-6.9b/layer-16-ctx1024-100m
 ```
 
 Extraction refuses to overwrite an existing output directory. Choose a new directory or move the
@@ -83,7 +97,7 @@ bash scripts/run_proposed.sh
 ```
 
 The pilot preset uses batch 512, no gradient accumulation, 10,000 steps, and a fresh output at
-`runs/the-pile/pythia-6.9b-layer16/proposed-axis512`. The output is deliberately separate from
+`runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512`. The output is deliberately separate from
 pre-axis checkpoints and starts from a fresh initialization. Do not resume a collapsed checkpoint:
 axis loss discourages feature death while gradients still cross ReLU, but cannot guarantee revival
 once every sample for a feature is in ReLU's negative region.
@@ -117,11 +131,11 @@ bash scripts/run_comparison.sh
 
 ```bash
 lejepa-evaluate \
-  --config runs/the-pile/pythia-6.9b-layer16/proposed-axis512/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed-axis512/checkpoint-00010000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/checkpoint-00010000.pt \
   --max-tokens 10000 \
   --top-k 20 \
-  --output-dir runs/the-pile/pythia-6.9b-layer16/proposed-axis512/evaluation
+  --output-dir runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/evaluation
 ```
 
 Open `evaluation/index.html` first. Evaluation writes:
@@ -149,8 +163,8 @@ The proposed model has no decoder vector, so interventions are explicitly sample
 
 ```bash
 lejepa-intervene \
-  --config runs/the-pile/pythia-6.9b-layer16/proposed-axis512/config.resolved.yaml \
-  --checkpoint runs/the-pile/pythia-6.9b-layer16/proposed-axis512/checkpoint-00010000.pt \
+  --config runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/config.resolved.yaml \
+  --checkpoint runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512/checkpoint-00010000.pt \
   --token-index 42 \
   --feature-index 123 \
   --alpha 5 \

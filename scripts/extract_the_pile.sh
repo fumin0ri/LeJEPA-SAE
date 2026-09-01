@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Each official random-sample row contains 64 Pythia tokens. 10,000 rows are
-# 640k source tokens and about 4.9 GiB of width-4096 bf16 residuals.
-max_sequences="${MAX_SEQUENCES:-10000}"
+# 100M width-4096 bf16 activations require about 763 GiB before filesystem
+# overhead. Source tokens are consumed once and the final document is truncated
+# so the configured budget is not exceeded.
+data_files="${DATA_FILES:-/datasets/the-pile/train/*.jsonl.zst}"
+max_source_tokens="${MAX_SOURCE_TOKENS:-100000000}"
+output_dir="${OUTPUT_DIR:-data/the-pile/pythia-6.9b/layer-16-ctx1024-100m}"
 
 lejepa-extract \
-  --dataset EleutherAI/pile-duped-pythia-random-sampled \
-  --dataset-revision 49487e95e42f4532534e8d7d8bc17d42795b5af8 \
+  --dataset json \
+  --data-files "$data_files" \
   --source-split train \
-  --token-ids-column Tokens \
-  --id-column Index \
+  --text-column text \
   --model EleutherAI/pythia-6.9b \
   --revision main \
   --layer 16 \
-  --context-length 512 \
+  --context-length 1024 \
   --window-size 1 \
   --dtype bfloat16 \
   --shard-tokens 50000 \
-  --max-documents "$max_sequences" \
-  --output-dir data/the-pile/pythia-6.9b/layer-16
+  --max-source-tokens "$max_source_tokens" \
+  --output-dir "$output_dir"

@@ -10,5 +10,5 @@ for model_type in standard_sae dimension_denoising_sae proposed; do
   fi
   lejepa-train --config "$config" \
     --set "model.type=$model_type" \
-    --set "train.output_dir=runs/the-pile/pythia-6.9b-layer16/$output_name"
+    --set "train.output_dir=runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/$output_name"
 done

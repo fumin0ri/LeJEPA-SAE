@@ -1,5 +1,5 @@
 data:
-  activation_dir: data/the-pile/pythia-6.9b/layer-16
+  activation_dir: data/the-pile/pythia-6.9b/layer-16-ctx1024-100m
   window_size: 1
   train_stride: 1
   eval_stride: 1
@@ -42,5 +42,5 @@ train:
   eval_every: 1000
   checkpoint_every: 10000
   eval_batches: 12
-  output_dir: runs/the-pile/pythia-6.9b-layer16/proposed-axis512
+  output_dir: runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-axis512
   resume_from: null
