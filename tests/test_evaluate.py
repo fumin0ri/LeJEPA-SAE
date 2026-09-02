@@ -155,6 +155,7 @@ def test_evaluation_metrics_and_report_artifacts(
     assert "Active fraction" in training_chart
     assert "Global-local MSE" in training_chart
     assert "Random vs axis RDMReg" in training_chart
+    assert "Global vs local RDMReg contribution" in training_chart
     assert "Feature standard deviation" in training_chart
     assert len(
         (output_dir / "training_history.csv").read_text(encoding="utf-8").splitlines()

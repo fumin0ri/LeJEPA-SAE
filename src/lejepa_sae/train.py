@@ -161,14 +161,18 @@ def compute_loss(
     view_distribution_losses = (
         rdm.random_view_losses + config.loss.axis_weight * rdm.axis_view_losses
     )
+    global_distribution = view_distribution_losses[0]
+    local_distribution = view_distribution_losses[1:].mean()
     metrics = {
         "loss": loss.detach(),
         "invariance": invariance.detach(),
         "distribution": rdm.loss.detach(),
         "random_distribution": rdm.random_loss.detach(),
         "axis_distribution": rdm.axis_loss.detach(),
-        "global_distribution": view_distribution_losses[0].detach(),
-        "local_distribution": view_distribution_losses[1:].mean().detach(),
+        "global_distribution": global_distribution.detach(),
+        "local_distribution": local_distribution.detach(),
+        "global_rdm_contribution": (0.5 * global_distribution).detach(),
+        "local_rdm_contribution": (0.5 * local_distribution).detach(),
         "global_random_distribution": rdm.random_view_losses[0].detach(),
         "local_random_distribution": rdm.random_view_losses[1:].mean().detach(),
         "global_axis_distribution": rdm.axis_view_losses[0].detach(),

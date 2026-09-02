@@ -162,6 +162,16 @@ can be changed without editing the preset, for example:
 FEATURE_DIM=32768 EXPECTED_L0_FRACTION=0.005 bash scripts/run_proposed.sh
 ```
 
+RDMReg gives the complete global view and the group of four local views equal weight:
+
+```text
+L_RDM = 0.5 * L_global + 0.5 * mean(L_local_1, ..., L_local_4)
+```
+
+This grouping is applied independently to both random-projection and axis-projection losses. Logs
+include the raw global/local losses and their weighted contributions, whose sum is the reported
+`distribution` loss.
+
 The optional single-token reconstruction baselines remain available:
 
 ```bash
@@ -189,7 +199,7 @@ Open `evaluation/index.html` first. Evaluation writes:
 
 - `index.html`: metric cards, training curves, collapse status, feature histograms, and searchable top activations
 - `summary.md`: compact core-metric table, training curves, and the 20 highest-variance features
-- `training_curves.svg`: train/validation Active fraction, Global-local MSE, random/axis RDMReg, and feature standard deviation over steps
+- `training_curves.svg`: train/validation Active fraction, Global-local MSE, random/axis RDMReg, balanced global/local RDMReg contributions, and feature standard deviation over steps
 - `training_history.csv`: the scalar history used to draw the training curves
 - `feature_diagnostics.svg`: active-rate, standard-deviation, and maximum-activation distributions
 - `feature_metrics.csv`: per-feature active rate, mean, standard deviation, and maximum

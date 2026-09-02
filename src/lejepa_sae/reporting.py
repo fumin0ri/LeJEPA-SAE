@@ -124,6 +124,10 @@ TRAINING_HISTORY_FIELDS = [
     "invariance",
     "random_distribution",
     "axis_distribution",
+    "global_distribution",
+    "local_distribution",
+    "global_rdm_contribution",
+    "local_rdm_contribution",
     "feature_std",
     "global_dead_feature_fraction",
     "local_dead_feature_fraction",
@@ -236,6 +240,16 @@ def write_training_curves_svg(
             ],
         ),
         (
+            "Global vs local RDMReg contribution",
+            True,
+            [
+                ("global_rdm_contribution", "train", "Global train", "#2563eb"),
+                ("local_rdm_contribution", "train", "Local train", "#ea580c"),
+                ("global_rdm_contribution", "validation", "Global val", "#0891b2"),
+                ("local_rdm_contribution", "validation", "Local val", "#be123c"),
+            ],
+        ),
+        (
             "Feature standard deviation",
             False,
             [
@@ -244,7 +258,7 @@ def write_training_curves_svg(
             ],
         ),
     ]
-    width, height = 1200, 760
+    width, height = 1200, 1120
     panel_width, panel_height = 550, 300
     plot_left, plot_top, plot_width, plot_height = 62, 58, 458, 190
     pieces = [

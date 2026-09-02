@@ -93,6 +93,8 @@ def test_proposed_reports_collapse_diagnostics():
     expected = {
         "global_distribution",
         "local_distribution",
+        "global_rdm_contribution",
+        "local_rdm_contribution",
         "random_distribution",
         "axis_distribution",
         "global_random_distribution",
@@ -111,6 +113,10 @@ def test_proposed_reports_collapse_diagnostics():
     }
     assert expected <= metrics.keys()
     assert torch.isfinite(loss)
+    torch.testing.assert_close(
+        metrics["distribution"],
+        metrics["global_rdm_contribution"] + metrics["local_rdm_contribution"],
+    )
 
 
 def test_proposed_can_skip_expensive_diagnostics():
@@ -127,6 +133,8 @@ def test_proposed_can_skip_expensive_diagnostics():
         "axis_distribution",
         "global_distribution",
         "local_distribution",
+        "global_rdm_contribution",
+        "local_rdm_contribution",
         "global_random_distribution",
         "local_random_distribution",
         "global_axis_distribution",

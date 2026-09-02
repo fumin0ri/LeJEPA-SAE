@@ -220,7 +220,7 @@ def rectified_lp_rdm_regularization(
     projection_vectors: torch.Tensor | None = None,
     axis_indices: torch.Tensor | None = None,
 ) -> RDMRegularizationOutput:
-    """Multi-view RDMReg with random directions and direct coordinate marginals."""
+    """Multi-view RDMReg with equally weighted global and local view groups."""
     if isinstance(feature_views, list):
         if not feature_views:
             raise ValueError("At least one feature view is required")
@@ -271,8 +271,14 @@ def rectified_lp_rdm_regularization(
     axis_view_losses = sliced_wasserstein_2_on_axes(
         feature_tensor, targets, axis_indices
     )
-    random_loss = random_view_losses.mean()
-    axis_loss = axis_view_losses.mean()
+    if random_view_losses.numel() == 1:
+        random_loss = random_view_losses[0]
+        axis_loss = axis_view_losses[0]
+    else:
+        random_loss = 0.5 * (
+            random_view_losses[0] + random_view_losses[1:].mean()
+        )
+        axis_loss = 0.5 * (axis_view_losses[0] + axis_view_losses[1:].mean())
     return RDMRegularizationOutput(
         loss=random_loss + axis_weight * axis_loss,
         random_loss=random_loss,

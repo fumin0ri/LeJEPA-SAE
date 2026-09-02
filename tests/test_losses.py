@@ -217,8 +217,42 @@ def test_paper_rdm_uses_shared_projections_and_independent_targets():
     )
     torch.testing.assert_close(result.random_view_losses.detach(), expected_random)
     torch.testing.assert_close(result.axis_view_losses.detach(), expected_axis)
+    torch.testing.assert_close(
+        result.random_loss.detach(),
+        0.5 * expected_random[0] + 0.5 * expected_random[1:].mean(),
+    )
+    torch.testing.assert_close(
+        result.axis_loss.detach(),
+        0.5 * expected_axis[0] + 0.5 * expected_axis[1:].mean(),
+    )
     assert len({round(float(item), 7) for item in result.axis_view_losses.detach()}) > 1
     assert all(view.grad is not None and torch.isfinite(view.grad).all() for view in features)
+
+
+def test_rdm_gradient_weights_global_and_local_groups_equally():
+    features = torch.randn(5, 8, 6, requires_grad=True)
+    result = rectified_lp_rdm_regularization(
+        features,
+        4,
+        3,
+        1.0,
+        1.0,
+        0.0,
+        generator=torch.Generator().manual_seed(17),
+    )
+
+    (random_weights,) = torch.autograd.grad(
+        result.random_loss,
+        result.random_view_losses,
+        retain_graph=True,
+    )
+    (axis_weights,) = torch.autograd.grad(
+        result.axis_loss,
+        result.axis_view_losses,
+    )
+    expected = torch.tensor([0.5, 0.125, 0.125, 0.125, 0.125])
+    torch.testing.assert_close(random_weights, expected)
+    torch.testing.assert_close(axis_weights, expected)
 
 
 def test_paper_rdm_pushes_post_relu_collapsed_features():
