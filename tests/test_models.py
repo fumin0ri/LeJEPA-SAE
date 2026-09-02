@@ -5,7 +5,11 @@ import torch
 import torch.nn.functional as F
 
 from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, load_config
-from lejepa_sae.models import ProposedModel, build_model
+from lejepa_sae.models import (
+    ProposedModel,
+    build_model,
+    relu_forward_leaky_backward,
+)
 from lejepa_sae.train import compute_loss, resolve_training_steps, stack_dimension_views
 
 
@@ -40,6 +44,45 @@ def test_all_models_complete_backward_step(model_type):
 
 def test_proposed_is_the_dimension_mask_jepa_model():
     assert isinstance(build_model(tiny_config()), ProposedModel)
+
+
+def test_relu_forward_leaky_backward_has_relu_values_and_surrogate_gradient():
+    inputs = torch.tensor([-2.0, 0.0, 3.0], requires_grad=True)
+    outputs = relu_forward_leaky_backward(inputs, negative_slope=0.05)
+
+    torch.testing.assert_close(outputs, torch.tensor([0.0, 0.0, 3.0]))
+    outputs.sum().backward()
+    torch.testing.assert_close(inputs.grad, torch.tensor([0.05, 0.05, 1.0]))
+
+
+def test_leaky_backward_can_update_features_with_negative_preactivations():
+    regular_config = tiny_config()
+    leaky_config = tiny_config()
+    leaky_config.model.feature_activation = "relu_forward_leaky_backward"
+    leaky_config.model.leaky_backward_slope = 0.02
+    leaky_config.validate()
+
+    regular_model = build_model(regular_config)
+    leaky_model = build_model(leaky_config)
+    leaky_model.load_state_dict(regular_model.state_dict())
+    for model in (regular_model, leaky_model):
+        with torch.no_grad():
+            model.encoder.weight.zero_()
+            model.encoder.bias.fill_(-1.0)
+
+    residuals = torch.ones(4, regular_config.model.d_llm)
+    regular_features = regular_model(residuals).features
+    leaky_features = leaky_model(residuals).features
+    torch.testing.assert_close(regular_features, leaky_features)
+    assert torch.count_nonzero(leaky_features) == 0
+
+    regular_features.sum().backward()
+    leaky_features.sum().backward()
+    assert torch.count_nonzero(regular_model.encoder.bias.grad) == 0
+    torch.testing.assert_close(
+        leaky_model.encoder.bias.grad,
+        torch.full_like(leaky_model.encoder.bias, 4 * 0.02),
+    )
 
 
 def test_proposed_reports_collapse_diagnostics():
@@ -181,6 +224,28 @@ def test_dimension_keep_fraction_is_validated(keep_fraction):
         config.validate()
 
 
+@pytest.mark.parametrize("slope", [0.0, -0.01, 1.01])
+def test_leaky_backward_slope_is_validated(slope):
+    config = tiny_config()
+    config.model.leaky_backward_slope = slope
+    with pytest.raises(ValueError, match="leaky_backward_slope"):
+        config.validate()
+
+
+def test_feature_activation_is_validated():
+    config = tiny_config()
+    config.model.feature_activation = "gelu"
+    with pytest.raises(ValueError, match="feature_activation"):
+        config.validate()
+
+
+def test_leaky_backward_ablation_is_proposed_only():
+    config = tiny_config("standard_sae")
+    config.model.feature_activation = "relu_forward_leaky_backward"
+    with pytest.raises(ValueError, match="model.type=proposed"):
+        config.validate()
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -209,6 +274,8 @@ def test_main_preset_uses_single_token_paper_defaults():
     assert config.data.window_size == 1
     assert config.model.num_local_views == 4
     assert config.model.feature_dim == 16384
+    assert config.model.feature_activation == "relu"
+    assert config.model.leaky_backward_slope == 0.01
     assert config.loss.target_distribution == "rectified_lp_distribution"
     assert config.loss.lp_norm_parameter == 1.0
     assert config.loss.expected_l0_fraction == 0.009765625

@@ -115,6 +115,34 @@ pre-axis checkpoints and starts from a fresh initialization. Do not resume a col
 axis loss discourages feature death while gradients still cross ReLU, but cannot guarantee revival
 once every sample for a feature is in ReLU's negative region.
 
+### ReLU forward + leaky backward ablation
+
+For the high-sparsity regime, a dedicated experiment keeps exact ReLU feature values in the
+forward pass but uses a leaky surrogate derivative in the non-positive region:
+
+```text
+forward:  z = max(0, a)
+backward: dz/da = 1 if a > 0, otherwise alpha
+```
+
+Run it from a fresh initialization with:
+
+```bash
+bash scripts/run_leaky_backward.sh
+```
+
+The default is `alpha=0.01`. Override it without editing the preset, for example:
+
+```bash
+LEAKY_BACKWARD_SLOPE=0.05 bash scripts/run_leaky_backward.sh
+```
+
+This changes only the training gradient: activations, active fraction, L0 diagnostics, RDMReg
+inputs, and evaluation remain based on exact ReLU outputs. The run is written to a distinct
+`...-relu_forward_leaky_backward-s<alpha>` directory. Normal ReLU remains the main preset default,
+and `model.feature_activation` plus `model.leaky_backward_slope` are stored in the resolved config
+for reproducibility.
+
 If batch 512 is out of memory, preserve the effective batch in this order:
 
 ```bash

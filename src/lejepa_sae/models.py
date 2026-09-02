@@ -14,6 +14,33 @@ class ModelOutput:
     reconstruction: torch.Tensor | None = None
 
 
+class _ReLUForwardLeakyBackward(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, inputs: torch.Tensor, negative_slope: float) -> torch.Tensor:
+        ctx.save_for_backward(inputs > 0)
+        ctx.negative_slope = negative_slope
+        return inputs.relu()
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        (positive_region,) = ctx.saved_tensors
+        return (
+            torch.where(
+                positive_region,
+                grad_output,
+                grad_output * ctx.negative_slope,
+            ),
+            None,
+        )
+
+
+def relu_forward_leaky_backward(
+    inputs: torch.Tensor, negative_slope: float
+) -> torch.Tensor:
+    """Exact ReLU values with a leaky surrogate derivative in the non-positive region."""
+    return _ReLUForwardLeakyBackward.apply(inputs, negative_slope)
+
+
 class SparseLinearFeatureEncoder(nn.Module):
     """Shared pre-bias and sparse linear encoder for one residual activation."""
 
@@ -21,6 +48,8 @@ class SparseLinearFeatureEncoder(nn.Module):
         super().__init__()
         self.pre_bias = nn.Parameter(torch.zeros(config.d_llm))
         self.encoder = nn.Linear(config.d_llm, config.feature_dim)
+        self.feature_activation = config.feature_activation
+        self.leaky_backward_slope = config.leaky_backward_slope
         nn.init.zeros_(self.encoder.bias)
 
     def prepare_input(
@@ -45,7 +74,14 @@ class SparseLinearFeatureEncoder(nn.Module):
         residuals: torch.Tensor,
         dimension_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.encoder(self.prepare_input(residuals, dimension_mask)).relu()
+        preactivations = self.encoder(self.prepare_input(residuals, dimension_mask))
+        if self.feature_activation == "relu":
+            return preactivations.relu()
+        if self.feature_activation == "relu_forward_leaky_backward":
+            return relu_forward_leaky_backward(
+                preactivations, self.leaky_backward_slope
+            )
+        raise RuntimeError(f"Unsupported feature activation: {self.feature_activation}")
 
 
 class ProposedModel(SparseLinearFeatureEncoder):

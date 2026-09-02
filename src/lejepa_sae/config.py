@@ -8,6 +8,7 @@ import yaml
 
 ModelType = Literal["proposed", "standard_sae", "dimension_denoising_sae"]
 MODEL_TYPES = {"proposed", "standard_sae", "dimension_denoising_sae"}
+FEATURE_ACTIVATIONS = {"relu", "relu_forward_leaky_backward"}
 
 
 @dataclass
@@ -27,6 +28,8 @@ class ModelConfig:
     feature_dim: int = 16384
     num_local_views: int = 4
     dimension_keep_fraction: float = 0.5
+    feature_activation: str = "relu"
+    leaky_backward_slope: float = 0.01
 
 
 @dataclass
@@ -84,6 +87,19 @@ class ExperimentConfig:
             raise ValueError("model.num_local_views must be positive")
         if not 0.0 < self.model.dimension_keep_fraction <= 1.0:
             raise ValueError("model.dimension_keep_fraction must be in (0, 1]")
+        if self.model.feature_activation not in FEATURE_ACTIVATIONS:
+            raise ValueError(
+                f"model.feature_activation must be one of {sorted(FEATURE_ACTIVATIONS)}"
+            )
+        if not 0.0 < self.model.leaky_backward_slope <= 1.0:
+            raise ValueError("model.leaky_backward_slope must be in (0, 1]")
+        if (
+            self.model.feature_activation == "relu_forward_leaky_backward"
+            and self.model.type != "proposed"
+        ):
+            raise ValueError(
+                "relu_forward_leaky_backward is an ablation for model.type=proposed"
+            )
         if self.loss.rdm_projections < 1:
             raise ValueError("loss.rdm_projections must be positive")
         if not 1 <= self.loss.axis_projections <= self.model.feature_dim:
