@@ -6,8 +6,8 @@ from typing import Any, Literal
 
 import yaml
 
-ModelType = Literal["proposed", "standard_sae", "dimension_denoising_sae"]
-MODEL_TYPES = {"proposed", "standard_sae", "dimension_denoising_sae"}
+ModelType = Literal["proposed", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"]
+MODEL_TYPES = {"proposed", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}
 FEATURE_ACTIVATIONS = {"relu", "relu_forward_leaky_backward"}
 
 
@@ -46,7 +46,25 @@ class LossConfig:
     projection_vectors_type: str = "random"
     invariance_weight: float = 25.0
     reconstruction_weight: float = 1.0
-    sae_l1_coefficient: float = 1e-3
+
+
+@dataclass
+class BaselineConfig:
+    """Architecture-specific SAE settings; shared optimizer settings stay in TrainConfig."""
+
+    k: int | None = None
+    auxk_coefficient: float = 1.0 / 32.0
+    dead_feature_window_tokens: int = 10_000_000
+    k_aux: int = 2048
+    jump_relu_initial_threshold: float = 0.001
+    jump_relu_bandwidth: float = 0.001
+    jump_relu_lambda: float = 1e-3
+    jump_relu_sparsity_warmup_steps: int = 10_000
+    matryoshka_group_sizes: list[int] = field(
+        default_factory=lambda: [512, 1024, 2048, 4096, 8704]
+    )
+    matryoshka_weights: list[float] = field(default_factory=lambda: [0.2] * 5)
+    threshold_calibration_batches: int = 12
 
 
 @dataclass
@@ -74,7 +92,16 @@ class ExperimentConfig:
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
+    baseline: BaselineConfig = field(default_factory=BaselineConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+
+    @property
+    def target_l0(self) -> int:
+        if self.baseline.k is not None:
+            return self.baseline.k
+        if self.loss.expected_l0_fraction is None:
+            raise ValueError("baseline.k is required when loss.expected_l0_fraction is null")
+        return round(self.model.feature_dim * self.loss.expected_l0_fraction)
 
     def validate(self) -> None:
         if self.model.type not in MODEL_TYPES:
@@ -121,6 +148,38 @@ class ExperimentConfig:
                 raise ValueError("proposed currently supports loss.mode_of_sigma=sigma_GN")
             if self.loss.projection_vectors_type != "random":
                 raise ValueError("proposed currently supports projection_vectors_type=random")
+        else:
+            if self.target_l0 < 1 or self.target_l0 > self.model.feature_dim:
+                raise ValueError("baseline k/derived target L0 must be in [1, model.feature_dim]")
+            if self.baseline.auxk_coefficient < 0:
+                raise ValueError("baseline.auxk_coefficient must be non-negative")
+            if self.baseline.dead_feature_window_tokens < 1:
+                raise ValueError("baseline.dead_feature_window_tokens must be positive")
+            if self.baseline.k_aux < 1:
+                raise ValueError("baseline.k_aux must be positive")
+            if self.baseline.jump_relu_initial_threshold <= 0:
+                raise ValueError("baseline.jump_relu_initial_threshold must be positive")
+            if self.baseline.jump_relu_bandwidth <= 0:
+                raise ValueError("baseline.jump_relu_bandwidth must be positive")
+            if self.baseline.jump_relu_lambda < 0:
+                raise ValueError("baseline.jump_relu_lambda must be non-negative")
+            if self.baseline.jump_relu_sparsity_warmup_steps < 0:
+                raise ValueError("baseline.jump_relu_sparsity_warmup_steps cannot be negative")
+            if self.baseline.threshold_calibration_batches < 1:
+                raise ValueError("baseline.threshold_calibration_batches must be positive")
+            if self.model.type == "matryoshka_sae":
+                if any(size < 1 for size in self.baseline.matryoshka_group_sizes):
+                    raise ValueError("baseline.matryoshka_group_sizes must be positive")
+                if sum(self.baseline.matryoshka_group_sizes) != self.model.feature_dim:
+                    raise ValueError("matryoshka group sizes must sum to model.feature_dim")
+                if len(self.baseline.matryoshka_weights) != len(
+                    self.baseline.matryoshka_group_sizes
+                ):
+                    raise ValueError("matryoshka weights must match group sizes")
+                if any(weight < 0 for weight in self.baseline.matryoshka_weights) or not any(
+                    self.baseline.matryoshka_weights
+                ):
+                    raise ValueError("matryoshka weights must be non-negative and not all zero")
         if self.train.gradient_accumulation_steps < 1:
             raise ValueError("train.gradient_accumulation_steps must be positive")
         if self.train.batch_size < 1:
@@ -142,13 +201,14 @@ def _merge_dataclass(cls: type, values: dict[str, Any] | None):
 def load_config(path: str | Path) -> ExperimentConfig:
     with Path(path).open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
-    unknown = set(raw) - {"data", "model", "loss", "train"}
+    unknown = set(raw) - {"data", "model", "loss", "baseline", "train"}
     if unknown:
         raise ValueError(f"Unknown top-level config keys: {sorted(unknown)}")
     config = ExperimentConfig(
         data=_merge_dataclass(DataConfig, raw.get("data")),
         model=_merge_dataclass(ModelConfig, raw.get("model")),
         loss=_merge_dataclass(LossConfig, raw.get("loss")),
+        baseline=_merge_dataclass(BaselineConfig, raw.get("baseline")),
         train=_merge_dataclass(TrainConfig, raw.get("train")),
     )
     config.validate()

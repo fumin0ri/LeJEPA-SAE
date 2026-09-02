@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-config="${1:-configs/pythia-6.9b-layer16.yaml}"
+mode="${1:-all}"
+config="${CONFIG:-configs/pythia-6.9b-layer16.yaml}"
+root_dir="${COMPARISON_ROOT:-runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/comparison-d16384-l0-160}"
+cache_dir="${PROBE_CACHE:-data/sae-probes/pythia-6.9b-layer16}"
+pilot_steps="${PILOT_STEPS:-20000}"
 
-for model_type in standard_sae dimension_denoising_sae proposed; do
-  output_name="$model_type"
-  if [[ "$model_type" == "proposed" ]]; then
-    output_name="proposed-l0-0.009765625-axis512"
-  fi
-  lejepa-train --config "$config" \
-    --set "model.type=$model_type" \
-    --set "train.output_dir=runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/d16384/$output_name"
-done
+python -m lejepa_sae.pipeline "$mode" \
+  --config "$config" \
+  --root-dir "$root_dir" \
+  --model-cache-path "$cache_dir" \
+  --pilot-steps "$pilot_steps"

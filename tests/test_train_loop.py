@@ -8,7 +8,9 @@ from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, TrainCo
 from lejepa_sae.train import train
 
 
-@pytest.mark.parametrize("model_type", ["proposed", "standard_sae", "dimension_denoising_sae"])
+@pytest.mark.parametrize(
+    "model_type", ["proposed", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"]
+)
 def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
     activation_dir = tmp_path / "activations"
     shards = []
@@ -70,6 +72,10 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
     )
     config.loss.rdm_projections = 4
     config.loss.axis_projections = 4
+    config.baseline.k = 2
+    config.baseline.k_aux = 4
+    config.baseline.dead_feature_window_tokens = 2
+    config.baseline.matryoshka_group_sizes = [2, 2, 4, 4, 4]
     checkpoint = train(config)
 
     assert checkpoint.exists()
@@ -94,3 +100,20 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
             record["expected_l0_fraction"] == pytest.approx(0.009765625)
             for record in train_records
         )
+    else:
+        assert all("reconstruction" in record for record in train_records)
+        torch.testing.assert_close(
+            state["model"]["decoder.weight"].norm(dim=0),
+            torch.ones(config.model.feature_dim),
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        if model_type in {"batch_topk_sae", "matryoshka_sae"}:
+            assert (run_dir / "threshold_calibration.json").exists()
+            assert torch.isfinite(state["model"]["calibrated_threshold"])
+    if model_type == "batch_topk_sae":
+        config.train.resume_from = str(checkpoint)
+        config.train.max_steps = 3
+        resumed = train(config)
+        resumed_state = torch.load(resumed, map_location="cpu", weights_only=False)
+        assert resumed_state["step"] == 3

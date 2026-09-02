@@ -16,10 +16,8 @@ METRIC_LABELS = {
     "global_local_mse": ("Global-local MSE", "Invariance error; lower is better"),
     "support_jaccard": ("Support Jaccard", "Global/local active-set overlap; higher is better"),
     "full_reconstruction_mse": ("Full reconstruction MSE", "Full-input SAE reconstruction"),
-    "masked_reconstruction_mse": (
-        "Masked reconstruction MSE",
-        "Denoising SAE reconstruction from masked input",
-    ),
+    "fvu": ("FVU", "Fraction of residual activation variance left unexplained"),
+    "mean_l0": ("Mean L0", "Mean active features per token"),
 }
 
 
@@ -129,6 +127,14 @@ TRAINING_HISTORY_FIELDS = [
     "global_rdm_contribution",
     "local_rdm_contribution",
     "feature_std",
+    "l0",
+    "reconstruction",
+    "fvu",
+    "auxk",
+    "mean_threshold",
+    "sparsity_coefficient",
+    "dead_feature_fraction",
+    "tracker_dead_feature_fraction",
     "global_dead_feature_fraction",
     "local_dead_feature_fraction",
 ]
@@ -255,6 +261,16 @@ def write_training_curves_svg(
             [
                 ("feature_std", "train", "Train", "#4f46e5"),
                 ("feature_std", "validation", "Validation", "#db2777"),
+            ],
+        ),
+        (
+            "Reconstruction and FVU",
+            True,
+            [
+                ("reconstruction", "train", "MSE train", "#4f46e5"),
+                ("reconstruction", "validation", "MSE val", "#db2777"),
+                ("fvu", "train", "FVU train", "#059669"),
+                ("fvu", "validation", "FVU val", "#d97706"),
             ],
         ),
     ]
@@ -492,7 +508,7 @@ main{{max-width:1180px;margin:auto;padding:42px 24px 80px}}h1{{font-size:34px;ma
 .card-help,small{{color:var(--muted)}}.chart{{width:100%;padding:12px}}input{{width:100%;padding:13px 15px;border:1px solid var(--line);border-radius:10px;font:inherit;margin-bottom:12px}}
 details{{margin:9px 0;padding:13px 16px}}summary{{cursor:pointer;font-weight:800}}summary span{{float:right;color:var(--muted);font-weight:500}}
 li{{margin:10px 0}}.score{{display:inline-block;min-width:68px;color:var(--accent);font-weight:800}}small{{display:block;margin-left:72px}}
-</style></head><body><main><h1>Single-token JEPA evaluation</h1>
+</style></head><body><main><h1>Single-token sparse representation evaluation</h1>
 <div class="status {status_class}">{html.escape(status)}</div>
 <section class="cards">{"".join(cards)}</section>{training_section}<h2>Feature distributions</h2>
 <img class="chart" src="feature_diagnostics.svg" alt="Feature diagnostic histograms">

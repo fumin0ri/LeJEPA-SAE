@@ -30,7 +30,7 @@ from .losses import (
     random_axis_indices,
     rectified_lp_rdm_regularization,
 )
-from .models import build_model
+from .models import JumpReLUSAE, SAEBase, build_model
 from .views import sample_dimension_masks
 
 
@@ -85,50 +85,90 @@ def compute_loss(
     config: ExperimentConfig,
     include_diagnostics: bool = True,
     axis_indices: torch.Tensor | None = None,
+    step: int = 0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     model_type = config.model.type
     if residuals.shape[1] != 1:
         raise ValueError(f"{model_type} requires one-token residual windows")
     token_residuals = residuals[:, 0]
 
-    if model_type == "standard_sae":
-        output = model(token_residuals)
-        reconstruction = F.mse_loss(
-            output.reconstruction.float(), token_residuals.float()
-        )
-        sparsity = output.features.float().abs().mean()
-        loss = config.loss.reconstruction_weight * reconstruction
-        loss = loss + config.loss.sae_l1_coefficient * sparsity
-        return loss, {
-            "loss": loss.detach(),
+    if model_type in {"batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}:
+        output = model(token_residuals, pointwise=False if model.training else None)
+        if model.training:
+            model.update_dead_features_(output.features)
+        reconstruction = F.mse_loss(output.reconstruction.float(), token_residuals.float())
+        residual_float = token_residuals.float()
+        reconstruction_variance = (
+            residual_float - residual_float.mean(dim=0, keepdim=True)
+        ).square().mean().clamp_min(1e-12)
+        metrics = {
             "reconstruction": reconstruction.detach(),
-            "l1": sparsity.detach(),
-            "active_fraction": (output.features > 0).float().mean().detach(),
+            "fvu": (reconstruction / reconstruction_variance).detach(),
         }
+        if model_type == "matryoshka_sae":
+            prefix_losses = []
+            for width, weight in zip(
+                model.prefix_widths, model.prefix_weights, strict=True
+            ):
+                prefix_reconstruction = (
+                    F.linear(output.features[:, :width], model.decoder.weight[:, :width])
+                    + model.pre_bias
+                )
+                prefix_loss = F.mse_loss(
+                    prefix_reconstruction.float(), token_residuals.float()
+                )
+                prefix_losses.append(prefix_loss * weight)
+                metrics[f"prefix_{width}_mse"] = prefix_loss.detach()
+                metrics[f"prefix_{width}_fvu"] = (
+                    prefix_loss / reconstruction_variance
+                ).detach()
+            reconstruction_objective = torch.stack(prefix_losses).sum()
+        else:
+            reconstruction_objective = reconstruction
+
+        auxk = (
+            output.reconstruction.new_zeros((), dtype=torch.float32)
+            if isinstance(model, JumpReLUSAE)
+            else model.auxiliary_loss(
+                token_residuals, output.reconstruction, output.preactivations
+            )
+        )
+        loss = config.loss.reconstruction_weight * reconstruction_objective
+        loss = loss + config.baseline.auxk_coefficient * auxk
+        metrics["auxk"] = auxk.detach()
+        if isinstance(model, JumpReLUSAE):
+            l0_surrogate = model.l0_surrogate(output.preactivations).sum(dim=-1).mean()
+            warmup = min(
+                1.0,
+                step / max(1, config.baseline.jump_relu_sparsity_warmup_steps),
+            )
+            sparsity_coefficient = config.baseline.jump_relu_lambda * warmup
+            loss = loss + sparsity_coefficient * l0_surrogate
+            metrics["l0_penalty"] = l0_surrogate.detach()
+            metrics["sparsity_coefficient"] = torch.tensor(
+                sparsity_coefficient, device=loss.device
+            )
+            metrics["mean_threshold"] = model.threshold.detach().float().mean()
+        metrics["loss"] = loss.detach()
+        if include_diagnostics:
+            detached = output.features.detach()
+            active_counts = detached.gt(0).sum(dim=-1).float()
+            metrics.update(
+                {
+                    "l0": active_counts.mean(),
+                    "active_fraction": detached.gt(0).float().mean(),
+                    "dead_feature_fraction": detached.amax(dim=0).le(0).float().mean(),
+                    "tracker_dead_feature_fraction": model.dead_mask().float().mean(),
+                    "feature_std": detached.float().std(dim=0, unbiased=False).mean(),
+                }
+            )
+        return loss, metrics
 
     dimension_masks = sample_dimension_masks(
         token_residuals,
         config.model.num_local_views,
         config.model.dimension_keep_fraction,
     )
-    if model_type == "dimension_denoising_sae":
-        residual_views, masks = stack_dimension_views(
-            token_residuals, dimension_masks, include_global=False
-        )
-        output = model(residual_views, masks)
-        target = token_residuals.unsqueeze(0).expand_as(output.reconstruction)
-        reconstruction = F.mse_loss(output.reconstruction.float(), target.float())
-        sparsity = output.features.float().abs().mean()
-        loss = config.loss.reconstruction_weight * reconstruction
-        loss = loss + config.loss.sae_l1_coefficient * sparsity
-        flattened = output.features.flatten(0, 1)
-        return loss, {
-            "loss": loss.detach(),
-            "reconstruction": reconstruction.detach(),
-            "l1": sparsity.detach(),
-            "active_fraction": (flattened > 0).float().mean().detach(),
-        }
-
     residual_views, masks = stack_dimension_views(
         token_residuals, dimension_masks, include_global=True
     )
@@ -250,6 +290,39 @@ def aggregate_metrics(metrics: list[dict[str, torch.Tensor]]) -> dict[str, float
     }
 
 
+@torch.no_grad()
+def calibrate_batch_topk_threshold(
+    model: SAEBase,
+    loader: DataLoader,
+    config: ExperimentConfig,
+) -> dict[str, float]:
+    """Fit the pointwise threshold to validation preactivations at the training target L0."""
+    was_training = model.training
+    model.eval()
+    samples = []
+    for batch_index, batch in enumerate(loader):
+        if batch_index >= config.baseline.threshold_calibration_batches:
+            break
+        residuals = batch["residuals"][:, 0].to(config.train.device, non_blocking=True)
+        with autocast_context(config):
+            samples.append(model.preactivations(residuals).relu().float().cpu())
+    if not samples:
+        raise ValueError("No validation activations were available for threshold calibration")
+    activations = torch.cat(samples)
+    desired = min(activations.numel(), activations.shape[0] * config.target_l0)
+    kth_value = activations.flatten().topk(desired).values[-1]
+    threshold = torch.nextafter(kth_value, torch.tensor(-torch.inf))
+    model.calibrated_threshold.copy_(threshold.to(model.calibrated_threshold.device))
+    measured_l0 = float((activations > threshold).float().sum(dim=-1).mean())
+    if was_training:
+        model.train()
+    return {
+        "threshold": float(threshold),
+        "calibrated_l0": measured_l0,
+        "calibration_samples": float(activations.shape[0]),
+    }
+
+
 def resolve_training_steps(
     requested_max_steps: int | str,
     train_batches: int,
@@ -272,6 +345,9 @@ def evaluate_loss(
     loader: DataLoader,
     config: ExperimentConfig,
 ) -> dict[str, float]:
+    calibration = None
+    if isinstance(model, SAEBase) and not isinstance(model, JumpReLUSAE):
+        calibration = calibrate_batch_topk_threshold(model, loader, config)
     model.eval()
     collected = []
     for batch_index, batch in enumerate(loader):
@@ -282,7 +358,10 @@ def evaluate_loss(
             _, metrics = compute_loss(model, residuals, config)
         collected.append(metrics)
     model.train()
-    return aggregate_metrics(collected)
+    result = aggregate_metrics(collected)
+    if calibration is not None:
+        result.update(calibration)
+    return result
 
 
 def save_checkpoint(
@@ -301,6 +380,11 @@ def save_checkpoint(
         "config": config.to_dict(),
         "torch_rng_state": torch.get_rng_state(),
     }
+    if isinstance(model, SAEBase) and torch.isfinite(model.calibrated_threshold):
+        checkpoint["threshold_calibration"] = {
+            "threshold": float(model.calibrated_threshold),
+            "target_l0": config.target_l0,
+        }
     if torch.cuda.is_available():
         checkpoint["cuda_rng_state"] = torch.cuda.get_rng_state_all()
     final_path = output_dir / f"checkpoint-{step:08d}.pt"
@@ -433,14 +517,19 @@ def train(config: ExperimentConfig) -> Path:
                     config,
                     include_diagnostics=include_diagnostics,
                     axis_indices=step_axis_indices,
+                    step=step,
                 )
                 scaled_loss = loss / config.train.gradient_accumulation_steps
             scaled_loss.backward()
             interval_metrics.append(metrics)
             interval_samples += residuals.shape[0]
 
+        if isinstance(model, SAEBase):
+            model.project_decoder_gradients_()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.max_grad_norm)
         optimizer.step()
+        if isinstance(model, SAEBase):
+            model.normalize_decoder_()
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
         interval_steps += 1
@@ -514,11 +603,15 @@ def train(config: ExperimentConfig) -> Path:
             last_checkpoint = save_checkpoint(output_dir, step, model, optimizer, scheduler, config)
             excluded_interval_seconds += time.monotonic() - checkpoint_started
 
-    checkpoint_step = int(last_checkpoint.stem.split("-")[-1]) if last_checkpoint else -1
-    if checkpoint_step != config.train.max_steps:
-        last_checkpoint = save_checkpoint(
-            output_dir, config.train.max_steps, model, optimizer, scheduler, config
+    if isinstance(model, SAEBase) and not isinstance(model, JumpReLUSAE):
+        calibration = calibrate_batch_topk_threshold(model, validation_loader, config)
+        (output_dir / "threshold_calibration.json").write_text(
+            json.dumps(calibration, indent=2), encoding="utf-8"
         )
+    # Always rewrite the final checkpoint after calibration so pointwise inference is portable.
+    last_checkpoint = save_checkpoint(
+        output_dir, config.train.max_steps, model, optimizer, scheduler, config
+    )
     return last_checkpoint
 
 

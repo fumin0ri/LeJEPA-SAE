@@ -6,7 +6,11 @@ import torch.nn.functional as F
 
 from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, load_config
 from lejepa_sae.models import (
+    BatchTopKSAE,
+    JumpReLUSAE,
+    MatryoshkaSAE,
     ProposedModel,
+    batch_topk,
     build_model,
     relu_forward_leaky_backward,
 )
@@ -25,11 +29,16 @@ def tiny_config(model_type: str = "proposed") -> ExperimentConfig:
     )
     config.loss.rdm_projections = 4
     config.loss.axis_projections = 4
+    config.baseline.k = 2
+    config.baseline.k_aux = 4
+    config.baseline.matryoshka_group_sizes = [2, 2, 4, 4, 4]
     config.validate()
     return config
 
 
-@pytest.mark.parametrize("model_type", ["proposed", "standard_sae", "dimension_denoising_sae"])
+@pytest.mark.parametrize(
+    "model_type", ["proposed", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"]
+)
 def test_all_models_complete_backward_step(model_type):
     torch.manual_seed(2)
     config = tiny_config(model_type)
@@ -44,6 +53,81 @@ def test_all_models_complete_backward_step(model_type):
 
 def test_proposed_is_the_dimension_mask_jepa_model():
     assert isinstance(build_model(tiny_config()), ProposedModel)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected_type"),
+    [
+        ("batch_topk_sae", BatchTopKSAE),
+        ("jump_relu_sae", JumpReLUSAE),
+        ("matryoshka_sae", MatryoshkaSAE),
+    ],
+)
+def test_baseline_builders(model_type, expected_type):
+    assert isinstance(build_model(tiny_config(model_type)), expected_type)
+
+
+def test_batch_topk_keeps_exact_batch_times_k_and_is_permutation_equivariant():
+    values = torch.arange(1, 49, dtype=torch.float32).reshape(6, 8)
+    selected = batch_topk(values, 2)
+    assert int((selected > 0).sum()) == 12
+    permutation = torch.tensor([4, 1, 5, 0, 3, 2])
+    torch.testing.assert_close(batch_topk(values[permutation], 2), selected[permutation])
+
+
+def test_sae_decoder_columns_are_unit_norm_and_encoder_is_tied_at_initialization():
+    model = build_model(tiny_config("batch_topk_sae"))
+    torch.testing.assert_close(model.decoder.weight.norm(dim=0), torch.ones(16))
+    torch.testing.assert_close(model.encoder.weight, model.decoder.weight.T)
+
+
+def test_jumprelu_threshold_is_positive_and_l0_has_threshold_gradient():
+    model = build_model(tiny_config("jump_relu_sae"))
+    with torch.no_grad():
+        model.encoder.weight.zero_()
+        model.encoder.bias.fill_(0.001)
+    residuals = torch.randn(8, 8)
+    output = model(residuals)
+    penalty = model.l0_surrogate(output.preactivations).sum()
+    penalty.backward()
+    assert torch.all(model.threshold > 0)
+    assert model.log_threshold.grad is not None
+    assert torch.count_nonzero(model.log_threshold.grad) == model.log_threshold.numel()
+
+
+def test_matryoshka_prefixes_cover_full_width():
+    model = build_model(tiny_config("matryoshka_sae"))
+    assert model.prefix_widths == (2, 4, 8, 12, 16)
+
+
+def test_matryoshka_loss_is_equal_weighted_prefix_mean():
+    config = tiny_config("matryoshka_sae")
+    config.baseline.auxk_coefficient = 0.0
+    model = build_model(config)
+    loss, metrics = compute_loss(model, torch.randn(6, 1, 8), config)
+    expected = torch.stack(
+        [metrics[f"prefix_{width}_mse"] for width in model.prefix_widths]
+    ).mean()
+    torch.testing.assert_close(loss.detach(), expected)
+
+
+def test_baseline_expensive_diagnostics_can_be_skipped():
+    config = tiny_config("batch_topk_sae")
+    model = build_model(config)
+    _, metrics = compute_loss(
+        model, torch.randn(6, 1, 8), config, include_diagnostics=False
+    )
+    assert "reconstruction" in metrics
+    assert "active_fraction" not in metrics
+    assert "feature_std" not in metrics
+
+
+def test_decoder_gradient_projection_removes_radial_component():
+    model = build_model(tiny_config("batch_topk_sae"))
+    model.decoder.weight.grad = model.decoder.weight.detach().clone()
+    model.project_decoder_gradients_()
+    radial = (model.decoder.weight * model.decoder.weight.grad).sum(dim=0)
+    torch.testing.assert_close(radial, torch.zeros_like(radial), atol=1e-6, rtol=0)
 
 
 def test_relu_forward_leaky_backward_has_relu_values_and_surrogate_gradient():
@@ -224,6 +308,21 @@ def test_all_model_types_require_one_token():
         config.validate()
 
 
+@pytest.mark.parametrize("legacy_type", ["standard_sae", "dimension_denoising_sae"])
+def test_removed_baseline_types_are_rejected(legacy_type):
+    config = tiny_config()
+    config.model.type = legacy_type
+    with pytest.raises(ValueError, match="model.type"):
+        config.validate()
+
+
+def test_default_baseline_target_l0_is_derived_from_fraction():
+    config = load_config("configs/pythia-6.9b-layer16.yaml")
+    config.model.type = "batch_topk_sae"
+    config.validate()
+    assert config.target_l0 == 160
+
+
 @pytest.mark.parametrize("keep_fraction", [0.0, 1.1])
 def test_dimension_keep_fraction_is_validated(keep_fraction):
     config = tiny_config()
@@ -248,7 +347,7 @@ def test_feature_activation_is_validated():
 
 
 def test_leaky_backward_ablation_is_proposed_only():
-    config = tiny_config("standard_sae")
+    config = tiny_config("batch_topk_sae")
     config.model.feature_activation = "relu_forward_leaky_backward"
     with pytest.raises(ValueError, match="model.type=proposed"):
         config.validate()
@@ -295,6 +394,15 @@ def test_main_preset_uses_single_token_paper_defaults():
     assert config.loss.axis_weight == 1.0
     assert config.loss.invariance_weight == 25.0
     assert config.loss.lambda_rdm == 125.0
+    assert config.target_l0 == 160
+    assert config.baseline.auxk_coefficient == pytest.approx(1 / 32)
+    assert config.baseline.dead_feature_window_tokens == 10_000_000
+    assert config.baseline.k_aux == 2048
+    assert config.baseline.jump_relu_initial_threshold == 0.001
+    assert config.baseline.jump_relu_bandwidth == 0.001
+    assert config.baseline.jump_relu_sparsity_warmup_steps == 10_000
+    assert config.baseline.matryoshka_group_sizes == [512, 1024, 2048, 4096, 8704]
+    assert config.baseline.matryoshka_weights == [0.2] * 5
     assert config.train.batch_size == 512
     assert config.train.gradient_accumulation_steps == 1
     assert config.train.max_steps == "one_epoch"

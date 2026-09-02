@@ -28,7 +28,19 @@ loss:
   mode_of_sigma: sigma_GN
   projection_vectors_type: random
   reconstruction_weight: 1.0
-  sae_l1_coefficient: 0.001
+
+baseline:
+  k: null
+  auxk_coefficient: 0.03125
+  dead_feature_window_tokens: 10000000
+  k_aux: 2048
+  jump_relu_initial_threshold: 0.001
+  jump_relu_bandwidth: 0.001
+  jump_relu_lambda: 0.001
+  jump_relu_sparsity_warmup_steps: 10000
+  matryoshka_group_sizes: [512, 1024, 2048, 4096, 8704]
+  matryoshka_weights: [0.2, 0.2, 0.2, 0.2, 0.2]
+  threshold_calibration_batches: 12
 
 train:
   seed: 42

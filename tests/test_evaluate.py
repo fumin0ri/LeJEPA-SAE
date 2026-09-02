@@ -53,12 +53,10 @@ def make_test_store(tmp_path):
 @pytest.mark.parametrize(
     ("model_type", "expected_metrics"),
     [
-        ("standard_sae", {"full_reconstruction_mse"}),
+        ("batch_topk_sae", {"full_reconstruction_mse", "fvu", "mean_l0"}),
+        ("jump_relu_sae", {"full_reconstruction_mse", "fvu", "mean_l0"}),
+        ("matryoshka_sae", {"full_reconstruction_mse", "fvu", "mean_l0"}),
         ("proposed", {"global_local_mse", "support_jaccard"}),
-        (
-            "dimension_denoising_sae",
-            {"full_reconstruction_mse", "masked_reconstruction_mse"},
-        ),
     ],
 )
 def test_evaluation_metrics_and_report_artifacts(
@@ -122,6 +120,8 @@ def test_evaluation_metrics_and_report_artifacts(
         ),
     )
     config.loss.axis_projections = 4
+    config.baseline.k = 2
+    config.baseline.matryoshka_group_sizes = [2, 2, 4, 4, 4]
     config.validate()
     checkpoint = tmp_path / f"{model_type}.pt"
     torch.save({"model": build_model(config).state_dict()}, checkpoint)
@@ -161,6 +161,6 @@ def test_evaluation_metrics_and_report_artifacts(
         (output_dir / "training_history.csv").read_text(encoding="utf-8").splitlines()
     ) == 4
     dashboard = (output_dir / "index.html").read_text(encoding="utf-8")
-    assert "Single-token JEPA evaluation" in dashboard
+    assert "Single-token sparse representation evaluation" in dashboard
     assert "Training curves" in dashboard
     assert "Highest-variance features" in dashboard

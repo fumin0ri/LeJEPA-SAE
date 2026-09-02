@@ -2,17 +2,19 @@
 
 from .config import ExperimentConfig, load_config
 from .models import (
-    DimensionDenoisingSAE,
+    BatchTopKSAE,
+    JumpReLUSAE,
+    MatryoshkaSAE,
     ProposedModel,
-    StandardSAE,
     build_model,
 )
 
 __all__ = [
     "ExperimentConfig",
-    "DimensionDenoisingSAE",
+    "BatchTopKSAE",
+    "JumpReLUSAE",
+    "MatryoshkaSAE",
     "ProposedModel",
-    "StandardSAE",
     "build_model",
     "load_config",
 ]

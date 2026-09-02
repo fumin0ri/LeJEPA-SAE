@@ -49,6 +49,8 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 pip install -e '.[dev]'
+# Only on the probing environment (adds TransformerLens, SAELens, sklearn, etc.)
+pip install -e '.[probes]'
 ```
 
 ## 1. Extract Pythia residual activations
@@ -172,19 +174,74 @@ This grouping is applied independently to both random-projection and axis-projec
 include the raw global/local losses and their weighted contributions, whose sum is the reported
 `distribution` loss.
 
-The optional single-token reconstruction baselines remain available:
+## 3. Strong SAE baselines and probing comparison
+
+The former `standard_sae` and `dimension_denoising_sae` baselines have been removed. The supported
+model types are now:
+
+| Type | Sparse mechanism | Training objective |
+|---|---|---|
+| `proposed` | ReLU or ReLU-forward/leaky-backward | invariance + random/axis RDMReg |
+| `batch_topk_sae` | [global BatchTopK](https://github.com/bartbussmann/BatchTopK), target `k=160` | full-token reconstruction + AuxK |
+| `jump_relu_sae` | [learned feature-wise JumpReLU threshold](https://storage.googleapis.com/jumprelu-saes-paper/JumpReLU_SAEs.pdf) | reconstruction + warmed-up λL0 |
+| `matryoshka_sae` | [Matryoshka BatchTopK](https://proceedings.mlr.press/v267/bussmann25a.html) with five nested prefixes | equally weighted prefix reconstructions + AuxK |
+
+All SAE baselines use a learned decoder/pre-bias, an untied decoder whose columns remain unit norm,
+and an encoder initialized to the decoder transpose. They do not normalize the residual input. The
+outer training envelope is shared with the proposed model: width 16384, batch 512, no accumulation,
+one pass over the activation dataset, AdamW at `1e-4`, and the same warmup/cosine schedule. The
+default target is derived from `loss.expected_l0_fraction`, so
+`round(16384 × 0.009765625) = 160`; set `baseline.k` to override it explicitly.
+
+BatchTopK and Matryoshka use batch-level TopK only during training. Validation activations calibrate
+a fixed scalar threshold, which is stored in `threshold_calibration.json` and the final checkpoint;
+evaluation and probing are therefore pointwise and independent of batch composition. Matryoshka
+uses groups `[512,1024,2048,4096,8704]`, hence cumulative prefix widths
+`[512,1536,3584,7680,16384]`.
+
+The complete comparison is resumable:
 
 ```bash
-bash scripts/run_comparison.sh
+bash scripts/run_comparison.sh train
+bash scripts/run_comparison.sh probe
+# or both phases
+bash scripts/run_comparison.sh all
 ```
 
-| Type | Input | Objective |
-|---|---|---|
-| `proposed` | complete global + four half-coordinate local views | invariance + RDMReg |
-| `standard_sae` | complete token | reconstruction + L1 |
-| `dimension_denoising_sae` | four half-coordinate views | full-token reconstruction + L1 |
+Training first runs a seed-42, 20,000-step JumpReLU λ calibration over
+`[1e-6,3e-6,1e-5,3e-5,1e-4,3e-4,1e-3,3e-3,1e-2]`. If no candidate is within 10% of L0=160,
+the grid extends by one decade in the required direction, at most three times. The selected λ and
+all pilot L0/FVU results are stored in `jumprelu-pilot/jumprelu_calibration.json`. It is reused for
+all three full seeds.
 
-## 3. Evaluate and visualize
+The full matrix is five series—proposed ReLU, proposed leaky-backward ablation, BatchTopK,
+JumpReLU, and Matryoshka—at seeds 42/43/44. This is 15 full 100M-token runs plus the pilots. Runs
+with a complete `latest.json`/`training_plan.json` pair are skipped. Batch 512 is intentionally
+required by this primary pipeline because BatchTopK is defined over the actual microbatch.
+
+The probe phase uses official [`sae-probes==0.4.*`](https://github.com/sae-probes/sae-probes), Pythia's
+`blocks.16.hook_resid_post`, the `normal` setting, L1 logistic probes, mean-activation
+normalization, probe seed 42, and `k=[1,2,4,8,16,32,64,128,256,512]`. Before the first probe it
+checks the Hugging Face extraction hook against TransformerLens on identical token IDs. A raw
+residual dense logistic probe is run once as a separate reference ceiling. All five Matryoshka
+prefixes are also probed as supplementary results.
+
+Probe aggregation refuses to produce a formal report unless every run has the identical complete
+task×k set. It writes `comparison/index.html`, `summary.md`, JSON/CSV summaries, all-k curves,
+paired per-task deltas, a L0/FVU/dead-feature table, and Matryoshka prefix results. Metrics are first
+macro-averaged across tasks within each seed and then reported as mean ± standard deviation over
+the three seeds.
+
+Useful overrides are:
+
+```bash
+COMPARISON_ROOT=/scratch/lejepa-comparison \
+PROBE_CACHE=/scratch/sae-probes-cache \
+PILOT_STEPS=20000 \
+  bash scripts/run_comparison.sh all
+```
+
+## 4. Evaluate and visualize
 
 ```bash
 lejepa-evaluate \
@@ -214,7 +271,7 @@ Evaluation automatically reads `metrics.jsonl` from the `train.output_dir` store
 config. If the history was moved, pass `--training-metrics /path/to/metrics.jsonl`. Missing inferred
 history does not prevent evaluation; the report explains how to attach it.
 
-## 4. Local gradient intervention
+## 5. Local gradient intervention
 
 The proposed model has no decoder vector, so interventions are explicitly sample-dependent:
 

@@ -97,7 +97,8 @@ def evaluate(
     invariance_total = 0.0
     jaccard_total = 0.0
     full_reconstruction_total = 0.0
-    masked_reconstruction_total = 0.0
+    residual_sum = torch.zeros(config.model.d_llm, dtype=torch.float64)
+    residual_square_sum = torch.zeros(config.model.d_llm, dtype=torch.float64)
     evaluated = 0
 
     concept_labels: dict[str, str] = {}
@@ -118,6 +119,10 @@ def evaluate(
         feature_cpu = features.float().cpu()
         support = feature_cpu > support_epsilon
         count = features.shape[0]
+        residual_float = residuals[:, 0].float()
+        residual_cpu = residual_float.cpu().double()
+        residual_sum += residual_cpu.sum(dim=0)
+        residual_square_sum += residual_cpu.square().sum(dim=0)
 
         active_sum += support.sum(dim=0)
         value_sum += feature_cpu.sum(dim=0, dtype=torch.float64)
@@ -146,26 +151,11 @@ def evaluate(
             union = (global_support | local_support).sum(dim=1)
             jaccard_total += (intersection / union.clamp_min(1)).sum().item()
 
-        elif config.model.type == "dimension_denoising_sae":
-            token_residuals = residuals[:, 0]
-            dimension_mask = sample_dimension_masks(
-                token_residuals, 1, config.model.dimension_keep_fraction
-            )[0]
-            with autocast_context(config):
-                full_output = model(token_residuals)
-                masked_output = model(token_residuals, dimension_mask)
-            full_reconstruction_total += torch.nn.functional.mse_loss(
-                full_output.reconstruction.float(),
-                token_residuals.float(),
-                reduction="sum",
-            ).item() / config.model.d_llm
-            masked_reconstruction_total += torch.nn.functional.mse_loss(
-                masked_output.reconstruction.float(),
-                token_residuals.float(),
-                reduction="sum",
-            ).item() / config.model.d_llm
-
-        elif config.model.type == "standard_sae":
+        elif config.model.type in {
+            "batch_topk_sae",
+            "jump_relu_sae",
+            "matryoshka_sae",
+        }:
             with autocast_context(config):
                 full_output = model(residuals[:, 0])
             full_reconstruction_total += torch.nn.functional.mse_loss(
@@ -194,10 +184,14 @@ def evaluate(
     if config.model.type == "proposed":
         result["global_local_mse"] = invariance_total / evaluated
         result["support_jaccard"] = jaccard_total / evaluated
-    if config.model.type in {"standard_sae", "dimension_denoising_sae"}:
+    if config.model.type in {"batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}:
         result["full_reconstruction_mse"] = full_reconstruction_total / evaluated
-    if config.model.type == "dimension_denoising_sae":
-        result["masked_reconstruction_mse"] = masked_reconstruction_total / evaluated
+        residual_mean = residual_sum / evaluated
+        residual_variance = float(
+            (residual_square_sum / evaluated - residual_mean.square()).clamp_min(0).mean()
+        )
+        result["fvu"] = result["full_reconstruction_mse"] / max(residual_variance, 1e-12)
+        result["mean_l0"] = result["mean_active_fraction"] * feature_dim
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)

@@ -19,12 +19,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8"]
+probes = ["sae-probes==0.4.*"]
 
 [project.scripts]
 lejepa-extract = "lejepa_sae.extract:main"
 lejepa-train = "lejepa_sae.train:main"
 lejepa-evaluate = "lejepa_sae.evaluate:main"
 lejepa-intervene = "lejepa_sae.intervene:main"
+lejepa-probe = "lejepa_sae.probing:main"
+lejepa-compare = "lejepa_sae.comparison:main"
+lejepa-calibrate-jumprelu = "lejepa_sae.calibration:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
