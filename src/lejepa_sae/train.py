@@ -165,24 +165,32 @@ def compute_loss(
             )
         return loss, metrics
 
-    dimension_masks = sample_dimension_masks(
-        token_residuals,
-        config.model.num_local_views,
-        config.model.dimension_keep_fraction,
-    )
-    residual_views, masks = stack_dimension_views(
-        token_residuals, dimension_masks, include_global=True
-    )
-    output = model(residual_views, masks)
-    feature_views = output.features
+    has_local_views = config.model.num_local_views > 0
+    if has_local_views:
+        dimension_masks = sample_dimension_masks(
+            token_residuals,
+            config.model.num_local_views,
+            config.model.dimension_keep_fraction,
+        )
+        residual_views, masks = stack_dimension_views(
+            token_residuals, dimension_masks, include_global=True
+        )
+        output = model(residual_views, masks)
+        feature_views = output.features
+    else:
+        # A single unmasked forward, not duplicate full-mask local views.
+        output = model(token_residuals)
+        feature_views = output.features.unsqueeze(0)
     preactivations = output.preactivations if config.loss.rate_weight > 0 else None
     del output
     global_features = feature_views[0]
     local_features = feature_views[1:]
-    invariance = F.mse_loss(
-        local_features,
-        global_features.unsqueeze(0).expand_as(local_features),
-    )
+    invariance = None
+    if has_local_views:
+        invariance = F.mse_loss(
+            local_features,
+            global_features.unsqueeze(0).expand_as(local_features),
+        )
     rdm = rectified_lp_rdm_regularization(
         feature_views,
         config.loss.rdm_projections,
@@ -199,7 +207,9 @@ def compute_loss(
         ),
         axis_indices=axis_indices,
     )
-    base_loss = config.loss.invariance_weight * invariance + config.loss.lambda_rdm * rdm.loss
+    base_loss = config.loss.lambda_rdm * rdm.loss
+    if invariance is not None:
+        base_loss = config.loss.invariance_weight * invariance + base_loss
     loss = base_loss
     rate = None
     if config.loss.rate_weight > 0:
@@ -216,22 +226,27 @@ def compute_loss(
         rdm.random_view_losses + config.loss.axis_weight * rdm.axis_view_losses
     )
     global_distribution = view_distribution_losses[0]
-    local_distribution = view_distribution_losses[1:].mean()
     metrics = {
         "loss": loss.detach(),
-        "invariance": invariance.detach(),
         "distribution": rdm.loss.detach(),
         "random_distribution": rdm.random_loss.detach(),
         "axis_distribution": rdm.axis_loss.detach(),
         "global_distribution": global_distribution.detach(),
-        "local_distribution": local_distribution.detach(),
-        "global_rdm_contribution": (0.5 * global_distribution).detach(),
-        "local_rdm_contribution": (0.5 * local_distribution).detach(),
+        "global_rdm_contribution": (
+            (0.5 if has_local_views else 1.0) * global_distribution
+        ).detach(),
         "global_random_distribution": rdm.random_view_losses[0].detach(),
-        "local_random_distribution": rdm.random_view_losses[1:].mean().detach(),
         "global_axis_distribution": rdm.axis_view_losses[0].detach(),
-        "local_axis_distribution": rdm.axis_view_losses[1:].mean().detach(),
     }
+    if has_local_views:
+        local_distribution = view_distribution_losses[1:].mean()
+        metrics.update({
+            "invariance": invariance.detach(),
+            "local_distribution": local_distribution.detach(),
+            "local_rdm_contribution": (0.5 * local_distribution).detach(),
+            "local_random_distribution": rdm.random_view_losses[1:].mean().detach(),
+            "local_axis_distribution": rdm.axis_view_losses[1:].mean().detach(),
+        })
     if config.loss.expected_l0_fraction is not None:
         metrics["expected_l0_fraction"] = torch.tensor(
             config.loss.expected_l0_fraction,
@@ -268,27 +283,30 @@ def compute_loss(
         return loss, metrics
 
     flattened = feature_views.flatten(0, 1).detach()
-    flattened_locals = local_features.flatten(0, 1).detach()
     global_detached = global_features.detach()
     global_float = global_detached.float()
-    local_float = flattened_locals.float()
-    metrics.update(activation_transition_metrics(global_features, local_features))
     metrics.update(
         {
             "active_fraction": (flattened > 0).float().mean().detach(),
             "l0_sparsity": (flattened > 0).float().mean().detach(),
             "l1_sparsity": l1_sparsity_metric(flattened).detach(),
             "feature_std": flattened.float().std(dim=0, unbiased=False).mean(),
+            "global_active_fraction": (global_detached > 0).float().mean(),
             "global_feature_std": global_float.std(dim=0, unbiased=False).mean(),
-            "local_feature_std": local_float.std(dim=0, unbiased=False).mean(),
             "global_dead_feature_fraction": (
                 global_detached.amax(dim=0) <= 0
             ).float().mean(),
-            "local_dead_feature_fraction": (
-                flattened_locals.amax(dim=0) <= 0
-            ).float().mean().detach(),
         }
     )
+    if has_local_views:
+        flattened_locals = local_features.flatten(0, 1).detach()
+        metrics.update(activation_transition_metrics(global_features, local_features))
+        metrics.update({
+            "local_feature_std": flattened_locals.float().std(dim=0, unbiased=False).mean(),
+            "local_dead_feature_fraction": (
+                flattened_locals.amax(dim=0) <= 0
+            ).float().mean(),
+        })
     return loss, metrics
 
 

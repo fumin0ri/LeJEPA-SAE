@@ -9,20 +9,21 @@ from lejepa_sae.train import train
 
 
 @pytest.mark.parametrize(
-    ("model_type", "mask_scaling", "rate_activation"),
+    ("model_type", "mask_scaling", "rate_activation", "num_local_views"),
     [
-        ("proposed", "inverted", None),
-        ("proposed", "sqrt", None),
-        ("proposed", "none", None),
-        ("proposed", "sqrt", "relu"),
-        ("proposed", "sqrt", "relu_forward_leaky_backward"),
-        ("batch_topk_sae", "inverted", None),
-        ("jump_relu_sae", "inverted", None),
-        ("matryoshka_sae", "inverted", None),
+        ("proposed", "inverted", None, 2),
+        ("proposed", "sqrt", None, 2),
+        ("proposed", "none", None, 2),
+        ("proposed", "sqrt", "relu", 2),
+        ("proposed", "sqrt", "relu_forward_leaky_backward", 2),
+        ("proposed", "sqrt", None, 0),
+        ("batch_topk_sae", "inverted", None, 2),
+        ("jump_relu_sae", "inverted", None, 2),
+        ("matryoshka_sae", "inverted", None, 2),
     ],
 )
 def test_end_to_end_cpu_training_and_checkpoint(
-    tmp_path, model_type, mask_scaling, rate_activation
+    tmp_path, model_type, mask_scaling, rate_activation, num_local_views
 ):
     activation_dir = tmp_path / "activations"
     shards = []
@@ -66,7 +67,7 @@ def test_end_to_end_cpu_training_and_checkpoint(
             type=model_type,
             d_llm=8,
             feature_dim=16,
-            num_local_views=2,
+            num_local_views=num_local_views,
             mask_scaling=mask_scaling,
         ),
         train=TrainConfig(
@@ -85,6 +86,10 @@ def test_end_to_end_cpu_training_and_checkpoint(
     )
     config.loss.rdm_projections = 4
     config.loss.axis_projections = 4
+    if num_local_views == 0:
+        config.loss.invariance_weight = 0
+        config.model.feature_activation = "relu_forward_leaky_backward"
+        config.model.leaky_backward_slope = 0.1
     config.baseline.k = 2
     config.baseline.k_aux = 4
     config.baseline.dead_feature_window_tokens = 2
@@ -117,6 +122,15 @@ def test_end_to_end_cpu_training_and_checkpoint(
     if model_type == "proposed":
         assert all("feature_std" in record for record in train_records)
         for record in records:
+            if num_local_views == 0:
+                assert "invariance" not in record
+                assert "off_to_on" not in record
+                assert not any("local" in key for key in record)
+                assert record["distribution"] == pytest.approx(record["global_distribution"])
+                assert record["loss"] == pytest.approx(
+                    config.loss.lambda_rdm * record["distribution"], rel=1e-6
+                )
+                continue
             assert 0 <= record["off_to_on"] <= 1
             assert 0 <= record["on_to_off"] <= 1
             assert record["off_to_on"] - record["on_to_off"] == pytest.approx(
@@ -149,7 +163,7 @@ def test_end_to_end_cpu_training_and_checkpoint(
         if model_type in {"batch_topk_sae", "matryoshka_sae"}:
             assert (run_dir / "threshold_calibration.json").exists()
             assert torch.isfinite(state["model"]["calibrated_threshold"])
-    if model_type == "batch_topk_sae" or rate_activation:
+    if model_type == "batch_topk_sae" or rate_activation or num_local_views == 0:
         config.train.resume_from = str(checkpoint)
         config.train.max_steps = 3
         resumed = train(config)

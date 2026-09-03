@@ -117,8 +117,21 @@ class ExperimentConfig:
             raise ValueError("single-token models require data.window_size=1")
         if self.model.d_llm < 1 or self.model.feature_dim < 1:
             raise ValueError("model dimensions must be positive")
-        if self.model.num_local_views < 1:
-            raise ValueError("model.num_local_views must be positive")
+        if (
+            not isinstance(self.model.num_local_views, int)
+            or isinstance(self.model.num_local_views, bool)
+            or self.model.num_local_views < 0
+        ):
+            raise ValueError("model.num_local_views must be a non-negative integer")
+        if self.model.num_local_views == 0:
+            if self.model.type != "proposed":
+                raise ValueError("zero local views are only supported for model.type=proposed")
+            if self.loss.invariance_weight != 0 or self.loss.rate_weight != 0:
+                raise ValueError(
+                    "global-only RDMReg requires invariance_weight=0 and rate_weight=0"
+                )
+            if not math.isfinite(self.loss.lambda_rdm) or self.loss.lambda_rdm <= 0:
+                raise ValueError("global-only RDMReg requires finite positive lambda_rdm")
         if not 0.0 < self.model.dimension_keep_fraction <= 1.0:
             raise ValueError("model.dimension_keep_fraction must be in (0, 1]")
         if self.model.mask_scaling not in MASK_SCALINGS:

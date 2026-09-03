@@ -135,7 +135,7 @@ def evaluate(
         token_rows.extend(batch_token_ids.cpu())
         document_ids.extend(batch_document_ids)
 
-        if config.model.type == "proposed":
+        if config.model.type == "proposed" and config.model.num_local_views > 0:
             token_residuals = residuals[:, 0]
             dimension_mask = sample_dimension_masks(
                 token_residuals, 1, config.model.dimension_keep_fraction
@@ -186,7 +186,7 @@ def evaluate(
         "dead_feature_fraction": float((maxima <= support_epsilon).float().mean()),
         "mean_feature_std": float(variance.sqrt().mean()),
     }
-    if config.model.type == "proposed":
+    if config.model.type == "proposed" and config.model.num_local_views > 0:
         result["global_local_mse"] = invariance_total / evaluated
         result["support_jaccard"] = jaccard_total / evaluated
         result.update({key: value / evaluated for key, value in transition_totals.items()})

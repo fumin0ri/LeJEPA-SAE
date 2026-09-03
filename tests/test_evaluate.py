@@ -216,6 +216,37 @@ def test_transition_units_and_legacy_history(tmp_path):
     assert "off_to_on" not in history[0]
 
 
+def test_global_only_evaluation_never_masks_or_reports_local_metrics(tmp_path, monkeypatch):
+    activation_dir = make_test_store(tmp_path)
+    config = ExperimentConfig(
+        data=DataConfig(activation_dir=str(activation_dir), num_workers=0),
+        model=ModelConfig(d_llm=8, feature_dim=16, num_local_views=0),
+        train=TrainConfig(device="cpu", precision="float32", batch_size=2),
+    )
+    config.loss.invariance_weight = 0
+    config.loss.axis_projections = 4
+    config.validate()
+    checkpoint = tmp_path / "global.pt"
+    torch.save({"model": build_model(config).state_dict()}, checkpoint)
+    monkeypatch.setattr(
+        "lejepa_sae.evaluate.AutoTokenizer.from_pretrained",
+        lambda *_args, **_kwargs: FakeTokenizer(),
+    )
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("global-only evaluation must not generate a local view")
+
+    monkeypatch.setattr("lejepa_sae.evaluate.sample_dimension_masks", forbidden)
+    output_dir = tmp_path / "evaluation-global"
+    result = evaluate(config, checkpoint, output_dir, 5, 2, 0.0)
+    assert result["tokens"] == 5
+    assert "mean_active_fraction" in result
+    assert "global_local_mse" not in result
+    assert "support_jaccard" not in result
+    assert "off_to_on" not in result
+    assert (output_dir / "index.html").exists()
+
+
 def test_rate_training_curves_and_csv(tmp_path):
     records = [
         {

@@ -245,6 +245,48 @@ Judge the ablation by target-rate error, `support_disagreement = off_to_on + on_
 global/local MSE, RDMReg, feature std, and dead-feature diagnostics, not sparsity gap alone.
 No Jaccard loss, margin loss, or automatic hyperparameter sweep is included.
 
+### Global-only RDMReg control (no mask, no invariance)
+
+Set `model.num_local_views=0`, `loss.invariance_weight=0`, and `loss.rate_weight=0`
+to train the same proposed encoder using only the complete global residual. This performs
+one unmasked encoder forward and one independent RDM target per batch. No dimension masks,
+local branches, invariance MSE, rate loss, or decoder are computed. The objective is:
+
+```text
+L = lambda_rdm * (L_global_random + axis_weight * L_global_axis)
+```
+
+The global term gets **100%** of the RDM weight, not the 50% contribution used in the
+global/local experiment. Random and axis projection counts, target distribution/L0,
+encoder activation (including leaky backward), optimizer/schedule and batch settings
+are inherited from the chosen run's saved config. Mask fraction/scaling fields stay in
+that config for provenance but are unused. Nonzero invariance/rate weights are rejected
+when `num_local_views=0`.
+
+Use the base run as the config source; its checkpoint is neither read nor resumed:
+
+```bash
+BASE_DIR="runs/rate-ablation/d16384-rho0.05-q0.5-sqrt-slope0.1-rate100-tau0.1-floor0.000001-seed42-steps10000/base"
+OUT_DIR="runs/global-rdm-only/d16384-rho0.05-slope0.1-seed42-steps10000"
+bash scripts/run_global_rdm_only.sh "$BASE_DIR" "$OUT_DIR"
+
+# After training, evaluate all normal tasks at k=1,16 using the existing shared cache.
+bash scripts/run_probe_pilot.sh probe "$OUT_DIR"
+```
+
+This launcher fixes 10,000 steps and seed 42, starts from a fresh initialization, refuses
+any existing output path, and launches only this single training run. Batch 512 means
+5.12M token presentations, as in the other pilots; the number of encoded views differs.
+For other step/seed settings use `lejepa-train --config ... --set ...` directly.
+
+Logs retain global active fraction, feature std, batch-dead fraction, L0/L1 metrics,
+random/axis RDMReg and throughput. `global_rdm_contribution == distribution` here.
+Local metrics, gate transitions and invariance are **absent**, not reported as zero;
+standalone evaluation likewise does not sample a diagnostic mask. The checkpoint and
+global probe adapter remain compatible with the proposed model. Data-order seed is
+preserved, but deleting mask/local-target draws changes the stochastic RDM RNG stream,
+so this is not a matched-random-target experiment.
+
 ### Global/local gate-transition diagnostics
 
 Training and validation log `off_to_on = P(a_G <= 0, a_L > 0)` and

@@ -264,7 +264,7 @@ def rectified_lp_rdm_regularization(
     projection_vectors: torch.Tensor | None = None,
     axis_indices: torch.Tensor | None = None,
 ) -> RDMRegularizationOutput:
-    """Multi-view RDMReg with equally weighted global and local view groups."""
+    """RDMReg: a single global view gets full weight; otherwise groups split 50:50."""
     if isinstance(feature_views, list):
         if not feature_views:
             raise ValueError("At least one feature view is required")
