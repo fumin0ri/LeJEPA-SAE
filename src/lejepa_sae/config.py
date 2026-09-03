@@ -38,6 +38,9 @@ class ModelConfig:
 @dataclass
 class LossConfig:
     lambda_rdm: float = 125.0
+    # Direct RDM-SAE coefficients. None preserves old configs/checkpoints.
+    rdm_random_weight: float | None = None
+    rdm_axis_weight: float | None = None
     rdm_target_scale: float = 1.0
     rdm_wasserstein_power: int = 2  # Transport cost power; independent of target shape p.
     rdm_random_wasserstein_power: int | None = None  # None inherits the common power.
@@ -58,6 +61,20 @@ class LossConfig:
     rate_temperature: float = 0.1
     rate_scale_floor: float = 1e-6
     rate_gradient_diagnostics: bool = False
+
+    @property
+    def effective_rdm_random_weight(self) -> float:
+        return self.lambda_rdm if self.rdm_random_weight is None else self.rdm_random_weight
+
+    @property
+    def effective_rdm_axis_weight(self) -> float:
+        if self.rdm_axis_weight is not None:
+            return self.rdm_axis_weight
+        return self.lambda_rdm * self.axis_weight
+
+    @property
+    def rdm_enabled(self) -> bool:
+        return self.effective_rdm_random_weight > 0 or self.effective_rdm_axis_weight > 0
 
     @property
     def random_wasserstein_power(self) -> int:
@@ -148,8 +165,18 @@ class ExperimentConfig:
                 or self.loss.reconstruction_weight <= 0
             ):
                 raise ValueError("rdm_sae requires finite positive reconstruction_weight")
-            if not math.isfinite(self.loss.lambda_rdm) or self.loss.lambda_rdm < 0:
-                raise ValueError("rdm_sae requires finite non-negative lambda_rdm")
+            if self.loss.rdm_random_weight is None or self.loss.rdm_axis_weight is None:
+                if not math.isfinite(self.loss.lambda_rdm) or self.loss.lambda_rdm < 0:
+                    raise ValueError(
+                        "legacy rdm_sae weights require finite non-negative lambda_rdm"
+                    )
+            for name in ("rdm_random_weight", "rdm_axis_weight"):
+                weight = getattr(self.loss, f"effective_{name}")
+                if (
+                    not isinstance(weight, int | float) or isinstance(weight, bool)
+                    or not math.isfinite(weight) or weight < 0
+                ):
+                    raise ValueError(f"loss.{name} must resolve to a finite non-negative number")
             if self.baseline.dead_feature_window_tokens < 1:
                 raise ValueError("baseline.dead_feature_window_tokens must be positive")
         elif self.model.num_local_views == 0:
@@ -197,8 +224,13 @@ class ExperimentConfig:
             raise ValueError("loss.rdm_projections must be positive")
         if not 1 <= self.loss.axis_projections <= self.model.feature_dim:
             raise ValueError("loss.axis_projections must be in [1, model.feature_dim]")
-        if not math.isfinite(self.loss.axis_weight) or self.loss.axis_weight <= 0:
-            raise ValueError("loss.axis_weight must be positive")
+        if self.model.type != "rdm_sae" or self.loss.rdm_axis_weight is None:
+            if not math.isfinite(self.loss.axis_weight) or self.loss.axis_weight <= 0:
+                raise ValueError("loss.axis_weight must be positive")
+        if self.model.type != "rdm_sae" and (
+            self.loss.rdm_random_weight is not None or self.loss.rdm_axis_weight is not None
+        ):
+            raise ValueError("direct RDM weights are only supported for rdm_sae")
         if not math.isfinite(self.loss.rate_weight) or self.loss.rate_weight < 0:
             raise ValueError("loss.rate_weight must be finite and non-negative")
         for name in ("rate_temperature", "rate_scale_floor"):
@@ -273,7 +305,14 @@ class ExperimentConfig:
             raise ValueError("train.max_steps must be a positive integer or one_epoch")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        if self.model.type == "rdm_sae":
+            # Save effective direct coefficients, also when resuming an older config.
+            result["loss"]["rdm_random_weight"] = self.loss.effective_rdm_random_weight
+            result["loss"]["rdm_axis_weight"] = self.loss.effective_rdm_axis_weight
+            result["loss"].pop("lambda_rdm")
+            result["loss"].pop("axis_weight")
+        return result
 
 
 def _merge_dataclass(cls: type, values: dict[str, Any] | None):

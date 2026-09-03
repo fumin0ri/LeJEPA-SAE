@@ -30,8 +30,8 @@ def rdm_config():
     config.loss.expected_l0_fraction = 0.05
     config.loss.rdm_projections = 4
     config.loss.axis_projections = 4
-    config.loss.axis_weight = 2
-    config.loss.lambda_rdm = 0.3
+    config.loss.rdm_random_weight = 0.3
+    config.loss.rdm_axis_weight = 0.6
     config.loss.reconstruction_weight = 1.5
     config.loss.rdm_target_scale = 2
     config.loss.rdm_gradient_diagnostics = True
@@ -59,8 +59,8 @@ def test_rdm_sae_matches_direct_objective_and_parameter_gradients(
     config.loss.rdm_axis_wasserstein_power = axis_power
     if axis_power == 1:
         config.loss.rdm_target_scale = 1.5
-        config.loss.axis_weight = 4
-        config.loss.lambda_rdm = config.loss.reconstruction_weight = 1
+        config.loss.rdm_axis_weight = 4
+        config.loss.rdm_random_weight = config.loss.reconstruction_weight = 1
     config.model.feature_activation = activation
     config.model.leaky_backward_slope = 0.1
     model = build_model(config)
@@ -94,12 +94,13 @@ def test_rdm_sae_matches_direct_objective_and_parameter_gradients(
             output.reconstruction.float(), residuals[:, 0].float()
         )
         rdm = rectified_lp_rdm_regularization(
-            output.features.unsqueeze(0), 4, 4, config.loss.axis_weight, 1,
+            output.features.unsqueeze(0), 4, 4, config.loss.rdm_axis_weight, 1,
             generalized_gaussian_mean_shift_for_active_fraction(1, 0.05),
             axis_indices=axes, target_scale=config.loss.rdm_target_scale, wasserstein_power=power,
+            random_weight=config.loss.rdm_random_weight,
             random_wasserstein_power=random_power, axis_wasserstein_power=axis_power,
         )
-        distribution = config.loss.lambda_rdm * rdm.loss
+        distribution = rdm.loss
         expected = reconstruction + distribution
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(metrics["reconstruction_contribution"], reconstruction.detach())
@@ -114,8 +115,8 @@ def test_rdm_sae_matches_direct_objective_and_parameter_gradients(
     for key, term in [
         ("reconstruction", reconstruction),
         ("rdm", distribution),
-        ("rdm_random", config.loss.lambda_rdm * rdm.random_loss),
-        ("rdm_axis", config.loss.lambda_rdm * config.loss.axis_weight * rdm.axis_loss),
+        ("rdm_random", config.loss.rdm_random_weight * rdm.random_loss),
+        ("rdm_axis", config.loss.rdm_axis_weight * rdm.axis_loss),
     ]:
         grad = torch.autograd.grad(term, output.preactivations, retain_graph=True)[0]
         rms = grad.float().square().mean().sqrt()
@@ -174,7 +175,7 @@ def test_rdm_sae_diagnostics_are_optional_and_do_not_change_backward(power):
 
 def test_zero_rdm_weight_is_pure_reconstruction_without_auxk_or_rng(monkeypatch):
     config = rdm_config()
-    config.loss.lambda_rdm = 0
+    config.loss.rdm_random_weight = config.loss.rdm_axis_weight = 0
     config.loss.expected_l0_fraction = None  # No baseline target_k is needed.
     config.baseline.auxk_coefficient = 1000
     config.validate()
@@ -238,8 +239,8 @@ def test_negative_features_have_only_the_configured_surrogate_gradient(slope):
         ("loss", "rate_weight", 1),
         ("loss", "reconstruction_weight", 0),
         ("loss", "reconstruction_weight", float("nan")),
-        ("loss", "lambda_rdm", -1),
-        ("loss", "lambda_rdm", float("inf")),
+        ("loss", "rdm_random_weight", -1),
+        ("loss", "rdm_axis_weight", float("inf")),
         ("loss", "rdm_target_scale", 0),
         ("loss", "rdm_target_scale", float("nan")),
         ("loss", "rdm_gradient_diagnostics", "true"),
@@ -261,7 +262,8 @@ def test_rdm_preset_and_legacy_defaults():
     assert config.model.feature_dim == 16384
     assert config.model.feature_activation == "relu_forward_leaky_backward"
     assert config.model.leaky_backward_slope == 0.1
-    assert config.loss.lambda_rdm == config.loss.reconstruction_weight == 1
+    assert config.loss.rdm_random_weight == config.loss.rdm_axis_weight == 1
+    assert config.loss.reconstruction_weight == 1
     assert config.loss.rdm_wasserstein_power == 2
     assert config.loss.expected_l0_fraction == 0.05
     assert config.train.batch_size == 512 and config.train.gradient_accumulation_steps == 1
@@ -288,6 +290,11 @@ def test_rdm_diagnostic_curves_hide_absent_local_metrics(tmp_path):
     assert history[0]["rdm_wasserstein_power"] == 2
     assert history[0]["rdm_random_wasserstein_power"] == 2
     assert history[0]["rdm_axis_wasserstein_power"] == 2
+    assert history[0]["rdm_random_weight"] == pytest.approx(0.3)
+    assert history[0]["rdm_axis_weight"] == pytest.approx(0.6)
+    assert history[0]["rdm_contribution"] == pytest.approx(
+        history[0]["rdm_random_contribution"] + history[0]["rdm_axis_contribution"]
+    )
     assert history[0]["rdm_to_reconstruction_grad_ratio"] == (
         record["rdm_to_reconstruction_grad_ratio"]
     )
@@ -298,6 +305,7 @@ def test_rdm_diagnostic_curves_hide_absent_local_metrics(tmp_path):
     assert "RDM / reconstruction gradient RMS" in svg
     assert "Active fraction" in svg and "Reconstruction and FVU" in svg
     assert "Thresholded active fractions (train)" in svg
+    assert "Weighted random vs axis RDM" in svg
     assert "Global-local" not in svg and "Gate transitions" not in svg
 
 
@@ -322,10 +330,13 @@ def test_launcher_overrides_and_fresh_output_guard(tmp_path, power, random_power
     output = tmp_path / "new run"
     env = {
         **os.environ,
-        "RDM_WEIGHT": "0.5", "RECONSTRUCTION_WEIGHT": "2", "RDM_TARGET_SCALE": "3",
+        "RDM_RANDOM_WEIGHT": "0.5", "RDM_AXIS_WEIGHT": "4",
+        "RECONSTRUCTION_WEIGHT": "2", "RDM_TARGET_SCALE": "3",
         "EXPECTED_L0_FRACTION": "0.03", "FEATURE_ACTIVATION": "relu",
         "BATCH_SIZE": "256", "GRAD_ACCUM": "2", "OUTPUT_DIR": "ignored-positional-wins",
     }
+    env.pop("RDM_WEIGHT", None)
+    env.pop("AXIS_WEIGHT", None)
     for key, value in (
         ("RDM_WASSERSTEIN_POWER", power),
         ("RDM_RANDOM_WASSERSTEIN_POWER", random_power),
@@ -345,7 +356,8 @@ def test_launcher_overrides_and_fresh_output_guard(tmp_path, power, random_power
     apply_overrides(config, args[3::2])
     assert config.model.type == "rdm_sae" and config.model.num_local_views == 0
     assert config.model.feature_activation == "relu"
-    assert config.loss.lambda_rdm == 0.5 and config.loss.reconstruction_weight == 2
+    assert config.loss.rdm_random_weight == 0.5 and config.loss.rdm_axis_weight == 4
+    assert config.loss.reconstruction_weight == 2
     assert config.loss.rdm_wasserstein_power == int(power or 2)
     assert config.loss.random_wasserstein_power == int(random_power or power or 2)
     assert config.loss.axis_wasserstein_power == int(axis_power or power or 2)
@@ -364,7 +376,8 @@ def test_launcher_overrides_and_fresh_output_guard(tmp_path, power, random_power
     expected_axis = int(axis_power or power or 2)
     tag = (f"wp{expected_random}" if expected_random == expected_axis
            else f"wpr{expected_random}-wpa{expected_axis}")
-    assert f"-{tag}-axis" in default_output
+    assert f"-{tag}-seed" in default_output
+    assert "-rw0.5-aw4-" in default_output
     output.mkdir()
     blocked = subprocess.run(command, capture_output=True, encoding="utf-8", env=env)
     assert blocked.returncode == 1 and "Refusing existing output" in blocked.stderr
@@ -377,3 +390,9 @@ def test_launcher_overrides_and_fresh_output_guard(tmp_path, power, random_power
         )
         assert invalid.returncode == 2 and f"{key} must be 1 or 2" in invalid.stderr
         assert not invalid.stdout
+    for old_key in ("RDM_WEIGHT", "AXIS_WEIGHT"):
+        old_run = subprocess.run(
+            command, capture_output=True, encoding="utf-8", env={**env, old_key: "1"},
+        )
+        assert old_run.returncode == 2 and "were replaced by direct" in old_run.stderr
+        assert not old_run.stdout

@@ -166,6 +166,10 @@ TRAINING_HISTORY_FIELDS = [
     "rdm_axis_wasserstein_power",
     "reconstruction_contribution",
     "rdm_contribution",
+    "rdm_random_contribution",
+    "rdm_axis_contribution",
+    "rdm_random_weight",
+    "rdm_axis_weight",
     "reconstruction_preactivation_grad_rms",
     "rdm_preactivation_grad_rms",
     "rdm_random_preactivation_grad_rms",
@@ -384,6 +388,17 @@ def write_training_curves_svg(
                 [("rdm_to_reconstruction_grad_ratio", "train", "RDM / recon", "#2563eb")],
             ),
         ])
+        if any("rdm_random_contribution" in row for row in history):
+            panels.append((
+                "Weighted random vs axis RDM",
+                True,
+                [
+                    ("rdm_random_contribution", "train", "Random train", "#2563eb"),
+                    ("rdm_axis_contribution", "train", "Axis train", "#ea580c"),
+                    ("rdm_random_contribution", "validation", "Random val", "#0891b2"),
+                    ("rdm_axis_contribution", "validation", "Axis val", "#be123c"),
+                ],
+            ))
         for kind in ("train", "validation"):
             panels.append((
                 f"Thresholded active fractions ({kind})",

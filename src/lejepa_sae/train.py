@@ -86,11 +86,12 @@ def compute_rdm(
     config: ExperimentConfig,
     axis_indices: torch.Tensor | None,
 ):
+    direct_weights = config.model.type == "rdm_sae"
     return rectified_lp_rdm_regularization(
         feature_views,
         config.loss.rdm_projections,
         config.loss.axis_projections,
-        config.loss.axis_weight,
+        config.loss.effective_rdm_axis_weight if direct_weights else config.loss.axis_weight,
         config.loss.lp_norm_parameter,
         (
             config.loss.mean_shift_value
@@ -101,6 +102,7 @@ def compute_rdm(
         ),
         axis_indices=axis_indices,
         target_scale=config.loss.rdm_target_scale,
+        random_weight=config.loss.effective_rdm_random_weight if direct_weights else 1.0,
         wasserstein_power=config.loss.rdm_wasserstein_power,
         random_wasserstein_power=config.loss.rdm_random_wasserstein_power,
         axis_wasserstein_power=config.loss.rdm_axis_wasserstein_power,
@@ -165,9 +167,15 @@ def compute_loss(
         if isinstance(model, RDMSAE):
             reconstruction_contribution = loss
             rdm_contribution = loss.new_zeros(())
-            if config.loss.lambda_rdm > 0:
+            random_contribution = loss.new_zeros(())
+            axis_contribution = loss.new_zeros(())
+            random_weight = config.loss.effective_rdm_random_weight
+            axis_weight = config.loss.effective_rdm_axis_weight
+            if config.loss.rdm_enabled:
                 rdm = compute_rdm(output.features.unsqueeze(0), config, axis_indices)
-                rdm_contribution = config.loss.lambda_rdm * rdm.loss
+                rdm_contribution = rdm.loss
+                random_contribution = random_weight * rdm.random_loss
+                axis_contribution = axis_weight * rdm.axis_loss
                 metrics.update({
                     "distribution": rdm.loss.detach(),
                     "random_distribution": rdm.random_loss.detach(),
@@ -177,6 +185,10 @@ def compute_loss(
             metrics.update({
                 "reconstruction_contribution": reconstruction_contribution.detach(),
                 "rdm_contribution": rdm_contribution.detach(),
+                "rdm_random_contribution": random_contribution.detach(),
+                "rdm_axis_contribution": axis_contribution.detach(),
+                "rdm_random_weight": loss.new_tensor(random_weight),
+                "rdm_axis_weight": loss.new_tensor(axis_weight),
                 "rdm_target_scale": loss.new_tensor(config.loss.rdm_target_scale),
                 "rdm_wasserstein_power": loss.new_tensor(config.loss.rdm_wasserstein_power),
                 "rdm_random_wasserstein_power": loss.new_tensor(
@@ -196,7 +208,7 @@ def compute_loss(
                 )[0]
                 reconstruction_rms = reconstruction_grad.detach().float().square().mean().sqrt()
                 rdm_rms = loss.new_zeros(())
-                if config.loss.lambda_rdm > 0:
+                if config.loss.rdm_enabled:
                     rdm_grad = torch.autograd.grad(
                         rdm_contribution, output.preactivations, retain_graph=True
                     )[0]
@@ -208,15 +220,14 @@ def compute_loss(
                         rdm_rms / reconstruction_rms.clamp_min(1e-12)
                     ),
                 })
-                for name in ("random", "axis"):
+                for name, weight, component in (
+                    ("random", random_weight, random_contribution),
+                    ("axis", axis_weight, axis_contribution),
+                ):
                     component_rms = loss.new_zeros(())
-                    if config.loss.lambda_rdm > 0:
-                        component = rdm.random_loss if name == "random" else rdm.axis_loss
-                        weight = config.loss.lambda_rdm
-                        if name == "axis":
-                            weight *= config.loss.axis_weight
+                    if weight > 0:
                         component_grad = torch.autograd.grad(
-                            weight * component, output.preactivations, retain_graph=True
+                            component, output.preactivations, retain_graph=True
                         )[0]
                         component_rms = component_grad.detach().float().square().mean().sqrt()
                         del component_grad
@@ -667,7 +678,7 @@ def train(config: ExperimentConfig) -> Path:
     for step in range(start_step + 1, config.train.max_steps + 1):
         step_axis_indices = None
         if config.model.type == "proposed" or (
-            config.model.type == "rdm_sae" and config.loss.lambda_rdm > 0
+            config.model.type == "rdm_sae" and config.loss.rdm_enabled
         ):
             step_axis_indices = random_axis_indices(
                 config.loss.axis_projections,

@@ -1,4 +1,4 @@
-# Reconstruction + RDM pilot. lambda_rdm=1 is a starting point, not a tuned optimum.
+# Reconstruction + RDM pilot. Direct weights of 1 are untuned starting points.
 data:
   activation_dir: data/the-pile/pythia-6.9b/layer-16-ctx1024-100m
   window_size: 1
@@ -16,7 +16,8 @@ model:
 
 loss:
   reconstruction_weight: 1.0
-  lambda_rdm: 1.0
+  rdm_random_weight: 1.0
+  rdm_axis_weight: 1.0
   rdm_target_scale: 1.0
   rdm_wasserstein_power: 2  # 1: W1; 2: historical W2 squared (no square root)
   rdm_random_wasserstein_power: null  # Per-term override; null inherits common power
@@ -24,7 +25,6 @@ loss:
   rdm_gradient_diagnostics: true
   rdm_projections: 8192
   axis_projections: 512
-  axis_weight: 1.0
   target_distribution: rectified_lp_distribution
   lp_norm_parameter: 1.0
   expected_l0_fraction: 0.05

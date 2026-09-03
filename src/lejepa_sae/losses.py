@@ -296,14 +296,22 @@ def rectified_lp_rdm_regularization(
     axis_indices: torch.Tensor | None = None,
     *,
     target_scale: float = 1.0,
+    random_weight: float = 1.0,
     wasserstein_power: int = 2,
     random_wasserstein_power: int | None = None,
     axis_wasserstein_power: int | None = None,
 ) -> RDMRegularizationOutput:
     """RDMReg with optional per-term powers; None inherits wasserstein_power.
 
+    Returns random_weight * random_loss + axis_weight * axis_loss; no outer multiplier.
     A single global view gets full weight; otherwise groups split 50:50.
     """
+    for name, weight in (("random_weight", random_weight), ("axis_weight", axis_weight)):
+        if (
+            not isinstance(weight, int | float) or isinstance(weight, bool)
+            or not math.isfinite(weight) or weight < 0
+        ):
+            raise ValueError(f"{name} must be finite and non-negative")
     _validate_wasserstein_power(wasserstein_power)
     random_power = (
         wasserstein_power if random_wasserstein_power is None else random_wasserstein_power
@@ -336,8 +344,6 @@ def rectified_lp_rdm_regularization(
     elif projection_vectors.shape != (num_projections, reference.shape[1]):
         raise ValueError("projection_vectors shape does not match num_projections/features")
     projection_vectors = projection_vectors.to(device=reference.device, dtype=reference.dtype)
-    if axis_weight < 0:
-        raise ValueError("axis_weight must be non-negative")
     if axis_indices is None:
         axis_indices = random_axis_indices(
             num_axis_projections,
@@ -375,7 +381,7 @@ def rectified_lp_rdm_regularization(
         )
         axis_loss = 0.5 * (axis_view_losses[0] + axis_view_losses[1:].mean())
     return RDMRegularizationOutput(
-        loss=random_loss + axis_weight * axis_loss,
+        loss=random_weight * random_loss + axis_weight * axis_loss,
         random_loss=random_loss,
         axis_loss=axis_loss,
         random_view_losses=random_view_losses,

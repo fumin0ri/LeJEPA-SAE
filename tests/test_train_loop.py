@@ -92,10 +92,10 @@ def test_end_to_end_cpu_training_and_checkpoint(
     config.loss.rdm_axis_wasserstein_power = axis_power
     if axis_power is not None:
         config.loss.rdm_target_scale = 1.5
-        config.loss.axis_weight = 4
     config.loss.axis_projections = 4
     if model_type == "rdm_sae":
-        config.loss.lambda_rdm = 1
+        config.loss.rdm_random_weight = 1
+        config.loss.rdm_axis_weight = 4 if axis_power is not None else 1
         config.loss.rdm_gradient_diagnostics = True
     if num_local_views == 0:
         config.loss.invariance_weight = 0
@@ -180,6 +180,10 @@ def test_end_to_end_cpu_training_and_checkpoint(
             from lejepa_sae.evaluate import load_model
             from lejepa_sae.probing import ProbeSAEAdapter
 
+            assert state["config"]["loss"]["rdm_random_weight"] == 1
+            assert state["config"]["loss"]["rdm_axis_weight"] == config.loss.rdm_axis_weight
+            assert "lambda_rdm" not in state["config"]["loss"]
+            assert "axis_weight" not in state["config"]["loss"]
             assert not (run_dir / "threshold_calibration.json").exists()
             assert "threshold_calibration" not in state
             assert "calibrated_threshold" not in state["model"]
@@ -190,6 +194,11 @@ def test_end_to_end_cpu_training_and_checkpoint(
             )
             for record in records:
                 assert record["rdm_wasserstein_power"] == rdm_power
+                assert record["rdm_random_weight"] == 1
+                assert record["rdm_axis_weight"] == config.loss.rdm_axis_weight
+                assert record["rdm_contribution"] == pytest.approx(
+                    record["rdm_random_contribution"] + record["rdm_axis_contribution"]
+                )
                 assert record["rdm_random_wasserstein_power"] == rdm_power
                 assert record["rdm_axis_wasserstein_power"] == (axis_power or rdm_power)
                 assert record["active_fraction_gt_0"] == record["active_fraction"]
@@ -213,3 +222,6 @@ def test_end_to_end_cpu_training_and_checkpoint(
         assert resumed_state["step"] == 3
         assert resumed_state["config"]["loss"]["rdm_wasserstein_power"] == rdm_power
         assert resumed_state["config"]["loss"]["rdm_axis_wasserstein_power"] == axis_power
+        if model_type == "rdm_sae":
+            assert resumed_state["config"]["loss"]["rdm_random_weight"] == 1
+            assert resumed_state["config"]["loss"]["rdm_axis_weight"] == config.loss.rdm_axis_weight

@@ -14,7 +14,8 @@ L1 penalty, TopK, AuxK, or threshold calibration:
 z = ReLU(W_enc (h - b_pre) + b_enc)
 h_hat = W_dec z + b_pre
 L = reconstruction_weight * mean((h_hat - h)^2)
-  + lambda_rdm * (L_random(z, target) + axis_weight * L_axis(z, target))
+  + rdm_random_weight * L_random(z, target)
+  + rdm_axis_weight * L_axis(z, target)
 ```
 
 The untied decoder columns are initialized and maintained at unit norm, with encoder weights
@@ -32,19 +33,22 @@ The original configs and comparison pipeline are unchanged; this launcher runs o
 bash scripts/run_rdm_sae.sh runs/rdm-sae/pilot-seed42-steps10000
 
 # Explicit weights and target amplitude; use a fresh output for every experiment.
-RDM_WEIGHT=1 RECONSTRUCTION_WEIGHT=1 RDM_TARGET_SCALE=1 \
+RDM_RANDOM_WEIGHT=1 RDM_AXIS_WEIGHT=1 RECONSTRUCTION_WEIGHT=1 RDM_TARGET_SCALE=1 \
   EXPECTED_L0_FRACTION=0.05 LEAKY_BACKWARD_SLOPE=0.1 \
   bash scripts/run_rdm_sae.sh runs/rdm-sae/custom-pilot
 ```
 
-`lambda_rdm=1.0` is an **untuned starting point**, not a recommendation that the loss terms are
-balanced. The old JEPA value 125 is not assumed appropriate for raw reconstruction MSE.
+The direct random/axis coefficients default to 1.0 as **untuned starting points**; this does
+not imply balanced terms. The old JEPA value 125 is not assumed appropriate for reconstruction MSE.
 `loss.rdm_target_scale` multiplies the **whole rectified target**, including its effective mean
 shift: `target = scale * ReLU(GN_p(mu, sigma_GN))`. It changes target amplitude but preserves
 its expected active fraction (not a guarantee of the model's measured L0). Defaults to 1 for
 old checkpoints as well. Target shape/shift can also be changed through the existing loss config.
-Positive `reconstruction_weight` and non-negative `lambda_rdm` are required for `rdm_sae`;
-`RDM_WEIGHT=0` is a reconstruction-only control that skips RDM sampling/computation entirely.
+Positive `reconstruction_weight` and finite non-negative direct RDM coefficients are required.
+`RDM_RANDOM_WEIGHT=0 RDM_AXIS_WEIGHT=0` is the reconstruction-only control and skips all RDM
+sampling/computation. Either coefficient can independently be zero. If one remains positive,
+both raw distances are still measured using the shared sampling scheme, while the disabled
+term contributes zero loss and zero gradient.
 
 Train/validation logs include MSE, FVU, raw random/axis RDM, weighted reconstruction/RDM terms,
 and log-time active fraction, L0, feature std and dead fractions. With
@@ -56,7 +60,7 @@ the validation MSE/FVU/L0 before choosing a new RDM weight; loss magnitudes alon
 L0 and FVU in training logs are per-batch diagnostics; standalone evaluation pools the test set.
 
 Other environment overrides: `FEATURE_DIM`, `SEED`, `MAX_STEPS`, `BATCH_SIZE`, `GRAD_ACCUM`,
-`EVAL_BATCHES`, `CHECKPOINT_EVERY`, `RDM_PROJECTIONS`, `AXIS_PROJECTIONS`, `AXIS_WEIGHT`,
+`EVAL_BATCHES`, `CHECKPOINT_EVERY`, `RDM_PROJECTIONS`, `AXIS_PROJECTIONS`,
 `RDM_GRADIENT_DIAGNOSTICS`, `CONFIG`, `OUTPUT_DIR` (positional output takes precedence).
 The launcher refuses existing outputs. On OOM, use a fresh output with `BATCH_SIZE=256 GRAD_ACCUM=2`,
 then `128/4` if needed; SWD then uses a smaller microbatch and is not numerically equivalent.
@@ -98,19 +102,19 @@ Run each condition from fresh initialization with the same settings and data:
 
 ```bash
 # Control: W2 squared
-RDM_TARGET_SCALE=1.5 AXIS_WEIGHT=4 RDM_WEIGHT=1 RDM_WASSERSTEIN_POWER=2 \
+RDM_TARGET_SCALE=1.5 RDM_RANDOM_WEIGHT=1 RDM_AXIS_WEIGHT=4 RDM_WASSERSTEIN_POWER=2 \
   EXPECTED_L0_FRACTION=0.05 SEED=42 MAX_STEPS=10000 \
-  bash scripts/run_rdm_sae.sh runs/rdm-sae/w2-scale1.5-axis4-seed42-steps10000
+  bash scripts/run_rdm_sae.sh runs/rdm-sae/w2-scale1.5-rw1-aw4-seed42-steps10000
 
 # Ablation: W1
-RDM_TARGET_SCALE=1.5 AXIS_WEIGHT=4 RDM_WEIGHT=1 RDM_WASSERSTEIN_POWER=1 \
+RDM_TARGET_SCALE=1.5 RDM_RANDOM_WEIGHT=1 RDM_AXIS_WEIGHT=4 RDM_WASSERSTEIN_POWER=1 \
   EXPECTED_L0_FRACTION=0.05 SEED=42 MAX_STEPS=10000 \
-  bash scripts/run_rdm_sae.sh runs/rdm-sae/w1-scale1.5-axis4-seed42-steps10000
+  bash scripts/run_rdm_sae.sh runs/rdm-sae/w1-scale1.5-rw1-aw4-seed42-steps10000
 ```
 
 The preset keeps target shape Laplace, forward ReLU / leaky backward slope 0.1, batch 512,
 and accumulation 1. The automatically generated output name includes `wp1` or `wp2` and the
-axis weight; explicit positional output directories still take precedence.
+both direct weights (`rw...-aw...`); explicit positional output directories take precedence.
 
 RDM-SAE train log steps and validation now include `active_fraction_gt_0`,
 `active_fraction_gt_1e-4`, `active_fraction_gt_1e-3`, `active_fraction_gt_1e-2`,
@@ -122,11 +126,15 @@ counts over evaluated tokens (including a short final batch), independently of `
 It can therefore diagnose leakage in existing W2 checkpoints without retraining.
 
 With `RDM_GRADIENT_DIAGNOSTICS=true`, training log steps additionally record
-`rdm_random_preactivation_grad_rms` for `lambda_rdm * L_random` and
-`rdm_axis_preactivation_grad_rms` for `lambda_rdm * axis_weight * L_axis`.
+`rdm_random_preactivation_grad_rms` for `rdm_random_weight * L_random` and
+`rdm_axis_preactivation_grad_rms` for `rdm_axis_weight * L_axis`.
 They include the activation surrogate derivative and are measured before gradient clipping
 or accumulation scaling. These RMS values do not add up to the combined RDM gradient RMS.
-They are omitted during validation and non-log steps, and are zero when `RDM_WEIGHT=0`.
+They are omitted during validation and non-log steps; a zero coefficient gives a zero term gradient.
+Train/validation also log the effective `rdm_random_weight`, `rdm_axis_weight`, and their
+`rdm_random_contribution` / `rdm_axis_contribution`. Their sum is `rdm_contribution`.
+For RDM-SAE, `distribution` now also denotes this directly weighted sum; compare the raw
+`random_distribution` and `axis_distribution` when inspecting unweighted distances.
 Training-history CSV and curves retain the transport power, threshold diagnostics and component
 gradients. Positive-activation quantiles are omitted to keep logging overhead bounded.
 
@@ -146,24 +154,25 @@ the random-projection term quadratic:
 
 ```text
 L = reconstruction_weight * L_rec
-  + lambda_rdm * W2_squared(random)
-  + lambda_rdm * axis_weight * W1(axis)
+  + rdm_random_weight * W2_squared(random)
+  + rdm_axis_weight * W1(axis)
 ```
 
-In the notation `L_rec + lambda_r * W2_squared + lambda_a * W1`, the existing controls map to
-`lambda_r = RDM_WEIGHT` and `lambda_a = RDM_WEIGHT * AXIS_WEIGHT` when reconstruction weight is 1.
-The reference below uses target scale 1.5, axis weight 4, `lambda_r=1`, and `lambda_a=4`:
+In `L_rec + lambda_r * W2_squared + lambda_a * W1`, set `lambda_r=RDM_RANDOM_WEIGHT` and
+`lambda_a=RDM_AXIS_WEIGHT` directly, with reconstruction weight 1. There is no common outer
+RDM multiplier. The reference uses target scale 1.5, `lambda_r=1`, and `lambda_a=4`:
 
 ```bash
-RDM_TARGET_SCALE=1.5 AXIS_WEIGHT=4 RDM_WEIGHT=1 RECONSTRUCTION_WEIGHT=1 \
+RDM_TARGET_SCALE=1.5 RDM_RANDOM_WEIGHT=1 RDM_AXIS_WEIGHT=4 RECONSTRUCTION_WEIGHT=1 \
   RDM_RANDOM_WASSERSTEIN_POWER=2 RDM_AXIS_WASSERSTEIN_POWER=1 \
   EXPECTED_L0_FRACTION=0.05 SEED=42 MAX_STEPS=10000 \
-  bash scripts/run_rdm_sae.sh runs/rdm-sae/random-w2-axis-w1-scale1.5-axis4-seed42-steps10000
+  bash scripts/run_rdm_sae.sh runs/rdm-sae/random-w2-axis-w1-scale1.5-rw1-aw4-seed42-steps10000
 ```
 
 For direct CLI/config usage, set `loss.rdm_random_wasserstein_power=2` and
-`loss.rdm_axis_wasserstein_power=1`, alongside `loss.rdm_target_scale=1.5`, `loss.axis_weight=4`
-and `loss.lambda_rdm=1`. Both per-term fields default to `null` and independently inherit
+`loss.rdm_axis_wasserstein_power=1`, alongside `loss.rdm_target_scale=1.5`,
+`loss.rdm_random_weight=1`, and `loss.rdm_axis_weight=4`. Both per-term power fields default
+to `null` and independently inherit
 `loss.rdm_wasserstein_power`. Older configs and common W1/W2 controls therefore keep their
 behavior. A non-null per-term value must be integer 1 or 2; target shape remains separate.
 Unset per-term launcher environment variables also inherit the common power.
@@ -180,6 +189,23 @@ their weighted preactivation gradient diagnostics follow their respective metric
 Default mixed-run output names contain `wpr2-wpa1` so they cannot collide with common-power runs.
 The previous W2/W2 and W1/W1 commands above remain the controls; keep per-term environment
 overrides unset when running those controls.
+
+### Weight compatibility
+
+The RDM-SAE preset and launcher use only the direct coefficients. For old YAML/checkpoint
+configs where a direct field is absent or `null`, its coefficient falls back to the historical
+value: random uses `lambda_rdm`, axis uses `lambda_rdm * axis_weight`. Explicit direct values,
+including zero, take precedence independently. This retains the old mathematical objective;
+regrouping floating-point multiplications may cause small rounding differences. Resolved YAML
+and newly saved RDM-SAE checkpoints contain the effective direct coefficients and omit the old
+`lambda_rdm`/`axis_weight` pair, including when continuing from an old config.
+
+For example, old `lambda_rdm=0.5, axis_weight=4` maps to `rdm_random_weight=0.5,
+rdm_axis_weight=2`. Old `1,4` maps to direct `1,4`. Changing the new random coefficient never
+multiplies the new axis coefficient. The launcher rejects the old `RDM_WEIGHT`/`AXIS_WEIGHT`
+environment variables with migration guidance rather than silently ignoring them.
+Existing JEPA/proposed launchers and their legacy weighting convention are unchanged;
+the new direct config fields are specific to `rdm_sae`.
 
 ## Proposed model
 
