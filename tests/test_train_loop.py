@@ -106,11 +106,22 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, mask_scali
     assert all(record["optimizer_steps_per_second"] > 0 for record in train_records)
     if model_type == "proposed":
         assert all("feature_std" in record for record in train_records)
+        for record in records:
+            assert 0 <= record["off_to_on"] <= 1
+            assert 0 <= record["on_to_off"] <= 1
+            assert record["off_to_on"] - record["on_to_off"] == pytest.approx(
+                record["local_active_fraction"] - record["global_active_fraction"],
+                abs=1e-7,
+            )
+            assert record["transition_rate_gap"] == pytest.approx(
+                record["local_global_active_fraction_gap"], abs=1e-7
+            )
         assert all(
             record["expected_l0_fraction"] == pytest.approx(0.009765625)
             for record in train_records
         )
     else:
+        assert all("off_to_on" not in record for record in records)
         assert all("reconstruction" in record for record in train_records)
         torch.testing.assert_close(
             state["model"]["decoder.weight"].norm(dim=0),

@@ -164,6 +164,32 @@ guarantee equal encoder preactivation variance when coordinates are correlated. 
 it also changes the expected local linear projection: it is `sqrt(q)` times the global linear
 term (`q` times for `none`, before adding encoder bias). These are distinct training objectives.
 
+### Global/local gate-transition diagnostics
+
+Training and validation log `off_to_on = P(a_G <= 0, a_L > 0)` and
+`on_to_off = P(a_G > 0, a_L <= 0)`. The denominator is **all** paired feature coordinates
+across tokens and local views, not only globally off/on features. Training uses every configured
+local view (four by default), paired with the same token's global features. Both forward activations
+are exact ReLU, so `z > 0` gives the same gate as `a > 0`, including the zero boundary.
+
+Two additional fields check the identity:
+
+```text
+local_global_active_fraction_gap = local_active_fraction - global_active_fraction
+transition_rate_gap = off_to_on - on_to_off
+```
+
+These should agree up to floating-point rounding. JSONL/CSV values are fractions (`0.041` means
+4.1%); the report plots transitions in percent and the gaps in percentage points. The training
+curves include both train/validation transitions and the overlapping gap curves. Older logs
+without these fields remain readable, but transition rates cannot be recovered from L0 alone.
+
+Like other feature diagnostics, training measures these only on the final microbatch of each
+log step; validation measures them on every evaluated batch. This adds no extra encoder forward,
+does not change the objective, and works with existing checkpoints. Standalone evaluation also
+reports the rates for its sampled global/local pair per token, using strict zero independently
+of `--support-epsilon`.
+
 ### ReLU forward + leaky backward ablation
 
 For the high-sparsity regime, a dedicated experiment keeps exact ReLU feature values in the
@@ -303,7 +329,7 @@ Open `evaluation/index.html` first. Evaluation writes:
 
 - `index.html`: metric cards, training curves, collapse status, feature histograms, and searchable top activations
 - `summary.md`: compact core-metric table, training curves, and the 20 highest-variance features
-- `training_curves.svg`: train/validation Active fraction, Global-local MSE, random/axis RDMReg, balanced global/local RDMReg contributions, and feature standard deviation over steps
+- `training_curves.svg`: train/validation Active fraction, Global-local MSE, random/axis RDMReg, balanced global/local RDMReg contributions, feature standard deviation, gate-transition rates, and sparsity-gap decomposition over steps
 - `training_history.csv`: the scalar history used to draw the training curves
 - `feature_diagnostics.svg`: active-rate, standard-deviation, and maximum-activation distributions
 - `feature_metrics.csv`: per-feature active rate, mean, standard deviation, and maximum
@@ -311,7 +337,7 @@ Open `evaluation/index.html` first. Evaluation writes:
 - `top_tokens.jsonl`: all requested top decoded token examples for every feature
 
 The proposed model reports active fraction, dead-feature fraction, feature variance,
-global-local MSE, and feature-support Jaccard. Optionally pass `--concept-labels labels.json`, where
+global-local MSE, feature-support Jaccard, and global/local gate-transition rates. Optionally pass `--concept-labels labels.json`, where
 the JSON maps `document_id` to a concept label, to add merging/splitting proxies.
 
 Evaluation automatically reads `metrics.jsonl` from the `train.output_dir` stored in the resolved

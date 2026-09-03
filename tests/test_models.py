@@ -189,6 +189,10 @@ def test_proposed_reports_collapse_diagnostics():
         "l1_sparsity",
         "global_active_fraction",
         "local_active_fraction",
+        "off_to_on",
+        "on_to_off",
+        "local_global_active_fraction_gap",
+        "transition_rate_gap",
         "global_feature_std",
         "local_feature_std",
         "global_dead_feature_fraction",
@@ -196,6 +200,10 @@ def test_proposed_reports_collapse_diagnostics():
         "expected_l0_fraction",
     }
     assert expected <= metrics.keys()
+    torch.testing.assert_close(
+        metrics["local_active_fraction"] - metrics["global_active_fraction"],
+        metrics["off_to_on"] - metrics["on_to_off"],
+    )
     assert torch.isfinite(loss)
     torch.testing.assert_close(
         metrics["distribution"],

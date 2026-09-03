@@ -18,13 +18,21 @@ METRIC_LABELS = {
     "full_reconstruction_mse": ("Full reconstruction MSE", "Full-input SAE reconstruction"),
     "fvu": ("FVU", "Fraction of residual activation variance left unexplained"),
     "mean_l0": ("Mean L0", "Mean active features per token"),
+    "global_active_fraction": ("Global active fraction", "Strict ReLU gate: a_G > 0"),
+    "local_active_fraction": ("Local active fraction", "Strict ReLU gate: a_L > 0"),
+    "off_to_on": ("OFF → ON", "P(a_G ≤ 0, a_L > 0); fraction of all paired coordinates"),
+    "on_to_off": ("ON → OFF", "P(a_G > 0, a_L ≤ 0); fraction of all paired coordinates"),
+    "local_global_active_fraction_gap": ("Local − global active fraction", "Sparsity gap in percentage points"),
+    "transition_rate_gap": ("OFF→ON − ON→OFF", "Must equal local − global active fraction, up to rounding"),
 }
 
 
 def _format_metric(key: str, value: float) -> str:
     if key == "tokens":
         return f"{int(value):,}"
-    if "fraction" in key or key == "support_jaccard":
+    if key in {"local_global_active_fraction_gap", "transition_rate_gap"}:
+        return f"{100 * value:+.3f} pp"
+    if "fraction" in key or key in {"support_jaccard", "off_to_on", "on_to_off"}:
         return f"{value:.2%}"
     return f"{value:.6g}"
 
@@ -119,6 +127,10 @@ TRAINING_HISTORY_FIELDS = [
     "expected_l0_fraction",
     "global_active_fraction",
     "local_active_fraction",
+    "off_to_on",
+    "on_to_off",
+    "local_global_active_fraction_gap",
+    "transition_rate_gap",
     "invariance",
     "random_distribution",
     "axis_distribution",
@@ -273,8 +285,28 @@ def write_training_curves_svg(
                 ("fvu", "validation", "FVU val", "#d97706"),
             ],
         ),
+        (
+            "Gate transitions (%)",
+            False,
+            [
+                ("off_to_on", "train", "OFF→ON train", "#2563eb"),
+                ("on_to_off", "train", "ON→OFF train", "#ea580c"),
+                ("off_to_on", "validation", "OFF→ON val", "#0891b2"),
+                ("on_to_off", "validation", "ON→OFF val", "#be123c"),
+            ],
+        ),
+        (
+            "Sparsity gap (percentage points)",
+            False,
+            [
+                ("local_global_active_fraction_gap", "train", "L−G train", "#2563eb"),
+                ("transition_rate_gap", "train", "Flow diff train", "#ea580c"),
+                ("local_global_active_fraction_gap", "validation", "L−G val", "#0891b2"),
+                ("transition_rate_gap", "validation", "Flow diff val", "#be123c"),
+            ],
+        ),
     ]
-    width, height = 1200, 1120
+    width, height = 1200, 40 + 360 * math.ceil(len(panels) / 2)
     panel_width, panel_height = 550, 300
     plot_left, plot_top, plot_width, plot_height = 62, 58, 458, 190
     pieces = [
@@ -318,7 +350,9 @@ def write_training_curves_svg(
             )
             continue
         min_value, max_value = min(transformed), max(transformed)
-        padding = max((max_value - min_value) * 0.08, 0.02 if not log_scale else 0.08)
+        percent_axis = title in {"Gate transitions (%)", "Sparsity gap (percentage points)"}
+        min_padding = 0.001 if percent_axis else (0.02 if not log_scale else 0.08)
+        padding = max((max_value - min_value) * 0.08, min_padding)
         min_value -= padding
         max_value += padding
 
@@ -326,6 +360,8 @@ def write_training_curves_svg(
             y = y0 + plot_height * (1 - fraction)
             raw_value = min_value + (max_value - min_value) * fraction
             label = f"{10 ** raw_value:.2g}" if log_scale else f"{raw_value:.3g}"
+            if percent_axis:
+                label = f"{100 * raw_value:.3g}"
             pieces.extend(
                 [
                     f'<line x1="{x0}" y1="{y:.2f}" x2="{x0 + plot_width}" y2="{y:.2f}" stroke="#e2e8f0"/>',
@@ -489,8 +525,10 @@ def write_evaluation_report(
 
     training_section = (
         '<h2>Training curves</h2><p>Train and validation history from metrics.jsonl. '
-        'Global-local MSE and RDMReg use logarithmic scales.</p>'
-        '<img class="chart" src="training_curves.svg" alt="Active fraction, global-local MSE, RDMReg, and feature standard deviation over training">'
+        'Global-local MSE and RDMReg use logarithmic scales. '
+        'Gate transitions use all paired coordinates as their denominator, not just initially active/inactive ones. '
+        'OFF→ON − ON→OFF equals local − global active fraction; the gap curves should overlap.</p>'
+        '<img class="chart" src="training_curves.svg" alt="Active fraction, global-local MSE, RDMReg, feature standard deviation, and gate transitions over training">'
         if training_history
         else '<h2>Training curves</h2><p class="card-help">No training metrics history was found. Pass <code>--training-metrics</code> to include it.</p>'
     )

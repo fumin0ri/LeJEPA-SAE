@@ -13,7 +13,7 @@ from .config import ExperimentConfig, load_config
 from .data import ActivationWindowDataset
 from .models import build_model
 from .reporting import load_training_history, write_evaluation_report
-from .train import autocast_context, seed_everything
+from .train import activation_transition_metrics, autocast_context, seed_everything
 from .views import sample_dimension_masks
 
 
@@ -96,6 +96,7 @@ def evaluate(
     maxima = torch.full((feature_dim,), -torch.inf)
     invariance_total = 0.0
     jaccard_total = 0.0
+    transition_totals: dict[str, float] = defaultdict(float)
     full_reconstruction_total = 0.0
     residual_sum = torch.zeros(config.model.d_llm, dtype=torch.float64)
     residual_square_sum = torch.zeros(config.model.d_llm, dtype=torch.float64)
@@ -140,8 +141,12 @@ def evaluate(
                 token_residuals, 1, config.model.dimension_keep_fraction
             )[0]
             with autocast_context(config):
-                global_features = model(token_residuals).features.float()
+                global_features = features.float()
                 local_features = model(token_residuals, dimension_mask).features.float()
+            for key, value in activation_transition_metrics(
+                global_features, local_features.unsqueeze(0)
+            ).items():
+                transition_totals[key] += value.item() * count
             invariance_total += torch.nn.functional.mse_loss(
                 global_features, local_features, reduction="sum"
             ).item() / feature_dim
@@ -184,6 +189,7 @@ def evaluate(
     if config.model.type == "proposed":
         result["global_local_mse"] = invariance_total / evaluated
         result["support_jaccard"] = jaccard_total / evaluated
+        result.update({key: value / evaluated for key, value in transition_totals.items()})
     if config.model.type in {"batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}:
         result["full_reconstruction_mse"] = full_reconstruction_total / evaluated
         residual_mean = residual_sum / evaluated

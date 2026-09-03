@@ -231,13 +231,12 @@ def compute_loss(
     global_detached = global_features.detach()
     global_float = global_detached.float()
     local_float = flattened_locals.float()
+    metrics.update(activation_transition_metrics(global_features, local_features))
     metrics.update(
         {
             "active_fraction": (flattened > 0).float().mean().detach(),
             "l0_sparsity": (flattened > 0).float().mean().detach(),
             "l1_sparsity": l1_sparsity_metric(flattened).detach(),
-            "global_active_fraction": (global_detached > 0).float().mean(),
-            "local_active_fraction": (flattened_locals > 0).float().mean().detach(),
             "feature_std": flattened.float().std(dim=0, unbiased=False).mean(),
             "global_feature_std": global_float.std(dim=0, unbiased=False).mean(),
             "local_feature_std": local_float.std(dim=0, unbiased=False).mean(),
@@ -250,6 +249,39 @@ def compute_loss(
         }
     )
     return loss, metrics
+
+
+@torch.no_grad()
+def activation_transition_metrics(
+    global_features: torch.Tensor,
+    local_features: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Unconditional gate probabilities over [local view, sample, coordinate].
+
+    For both proposed activations, forward is exact ReLU, so z > 0 iff a > 0.
+    Use strict zero, not an evaluation support epsilon. No extra forward is needed.
+    """
+    if (
+        global_features.ndim != 2
+        or local_features.ndim != 3
+        or local_features.shape[1:] != global_features.shape
+        or local_features.numel() == 0
+    ):
+        raise ValueError("Expected global [B, D] and nonempty local [V, B, D] features")
+    global_on = global_features > 0
+    local_on = local_features > 0
+    off_to_on = ((~global_on).unsqueeze(0) & local_on).float().mean()
+    on_to_off = (global_on.unsqueeze(0) & ~local_on).float().mean()
+    global_active = global_on.float().mean()
+    local_active = local_on.float().mean()
+    return {
+        "off_to_on": off_to_on,
+        "on_to_off": on_to_off,
+        "global_active_fraction": global_active,
+        "local_active_fraction": local_active,
+        "local_global_active_fraction_gap": local_active - global_active,
+        "transition_rate_gap": off_to_on - on_to_off,
+    }
 
 
 def make_loader(
