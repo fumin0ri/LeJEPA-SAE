@@ -395,6 +395,101 @@ PILOT_STEPS=20000 \
   bash scripts/run_comparison.sh all
 ```
 
+### Start with a 10k-step probing pilot on a single RTX 4090
+
+Do not use `run_comparison.sh all` for this pilot: it launches the full training matrix.
+Keep the trained base/rate=100/rate=200 checkpoints and train BatchTopK separately. For the
+rate=200 run whose validation global active fraction is `0.037643183`, an actual-L0-matched
+BatchTopK uses `baseline.k=617` (`16384 * 0.037643183`), not the nominal 5% target's 819.
+Check the final `threshold_calibration.json` and report the measured L0 as well.
+
+Install the optional probe dependencies in your environment (or a clone of the training
+environment if you want to leave its packages untouched):
+
+```bash
+git pull --ff-only
+python -m pip install -e '.[probes]'
+python -m pip check
+```
+
+The probe extra pins `sae-probes=0.4.0`, `transformer-lens=2.15.4`, `sae-lens=6.5.3`, and
+`scikit-learn=1.6.1` for the PyTorch 2.5.1 runtime and a reproducible probe API. Training does
+not require this extra. Keep the installed CUDA build of PyTorch 2.5.1 on the remote GPU host.
+
+First run the real official evaluator for just **one task at k=1,16** on both checkpoints:
+
+```bash
+# Replace the first path with your actual rate=200 training directory.
+R200="runs/your-rate200-run"
+BT_DIR="runs/pilot-comparison/seed42/batch-topk-k617-10k"
+
+bash scripts/run_probe_pilot.sh smoke "$R200" "$BT_DIR"
+```
+
+This does not train any models. It requires `config.resolved.yaml` and
+`checkpoint-00010000.pt` in each directory. `smoke` selects the first official task in sorted
+order and keeps that task's standard train/test split; it is not a benchmark score on all
+tasks. Only after both smoke tests succeed, run all official tasks at the same two k values:
+
+```bash
+bash scripts/run_probe_pilot.sh probe "$R200" "$BT_DIR"
+# Optional additional checkpoints, evaluated with the identical task set and probe seed:
+bash scripts/run_probe_pilot.sh probe "$BASE_DIR" "$RATE100_DIR"
+```
+
+The entry point preserves `normal`, L1, mean-activation normalization and probe seed 42.
+The proposed model encodes the complete unmasked global input; BatchTopK/Matryoshka use
+their checkpoint's calibrated pointwise threshold, never a probe-batch-dependent TopK.
+The adapter matches training's encoder autocast precision and returns float32 probe features.
+
+Both HF and TransformerLens in hook parity use explicit precision. TransformerLens uses
+`from_pretrained_no_processing`: weight centering must not change the residual coordinates.
+HF is released before TL is loaded, and the LLM is released before the SAE is moved onto the
+GPU. CUDA defaults to bfloat16 (CPU to float32), and activation generation defaults to batch 1
+with context length 1024. To try a larger activation batch or relocate the shared cache:
+
+```bash
+ACTIVATION_BATCH_SIZE=2 PROBE_CACHE=/scratch/sae-probes \
+  bash scripts/run_probe_pilot.sh smoke "$R200" "$BT_DIR"
+```
+
+Equivalent single-checkpoint CLI (use `--datasets TASK_NAME` to choose a specific task):
+
+```bash
+lejepa-probe \
+  --config "$R200/config.resolved.yaml" \
+  --checkpoint "$R200/checkpoint-00010000.pt" \
+  --results-path "$R200/probe-smoke-k1-k16" \
+  --model-cache-path data/sae-probes/pythia-6.9b-layer16 \
+  --llm-precision auto \
+  --activation-batch-size 1 \
+  --max-seq-len 1024 \
+  --smoke-test
+```
+
+Each output contains `hook_parity.json`, `probe_manifest.json`, the official per-task raw JSON,
+and (only after all requested task/k pairs succeed) `probe_summary.json` with macro F1, AUROC,
+and accuracy per k (`f1`, `auroc`, `accuracy`). F1 is the task-macro average of the official
+per-task class-weighted `test_f1`, not a replacement metric. Smoke outputs go to
+`probe-smoke-k1-k16`; pilot outputs go to
+`probes-normal-k1-k16`. Rerun the same command to resume completed tasks. Different checkpoints,
+task sets, k sets, or precision/config changes require a new results directory; the official
+evaluator otherwise skips an existing task file even when k changes.
+
+Activation caches are namespaced by no-processing mode, precision, context length and package
+versions, and accompanied by a provenance manifest. Legacy unversioned caches are not silently
+reused. Cache generation is completed with an explicitly configured small-batch LLM before the
+official evaluator can invoke its default float32 loader. All runs should use the same settings
+and task list in `probe_manifest.json`; compare summaries only when those task lists agree.
+LLM outputs are stored as float32 without changing their computed bfloat16 values, so the
+optional raw-residual logistic reference can also pass them to sklearn/NumPy.
+
+The local test suite covers CPU fixtures, optional real-library probe integration, precision
+handling and loader contracts. It does not establish 6.9B/4090 hook parity or peak memory:
+the remote smoke run is the required hardware preflight. A parity failure stops evaluation;
+do not use `--skip-parity` to hide a mismatch. One seed and 5.12M token presentations are a
+directional pilot, not the final 100M-token/multi-seed comparison.
+
 ## 4. Evaluate and visualize
 
 ```bash

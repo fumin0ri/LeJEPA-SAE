@@ -19,7 +19,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8"]
-probes = ["sae-probes==0.4.*"]
+# Keep the optional probe stack compatible with the training runtime (torch 2.5.1).
+# Newer SAE Lens releases require newer torch; sklearn changes can alter probe fits.
+probes = [
+  "sae-probes==0.4.0",
+  "transformer-lens==2.15.4",
+  "sae-lens==6.5.3",
+  "scikit-learn==1.6.1",
+]
 
 [project.scripts]
 lejepa-extract = "lejepa_sae.extract:main"
