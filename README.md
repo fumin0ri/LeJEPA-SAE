@@ -490,6 +490,30 @@ the remote smoke run is the required hardware preflight. A parity failure stops 
 do not use `--skip-parity` to hide a mismatch. One seed and 5.12M token presentations are a
 directional pilot, not the final 100M-token/multi-seed comparison.
 
+If BF16 elementwise parity fails, the preflight now records the actual activation scale,
+relative RMSE and maximum per-token relative L2 error in `hook_parity.json`, including on
+failure. HF GPT-NeoX sums `(MLP + attention) + residual`, whereas TransformerLens sums
+`(residual + attention) + MLP`; these need not agree in BF16. For example, adding two 8s
+to 2048 in the two orders can differ by 16. Absolute maximum error alone cannot distinguish
+this from a wrong hook.
+
+The preflight therefore checks a failing BF16 comparison again using FP32 arithmetic on
+the same BF16-rounded checkpoint weights. CPU weights remain in their original precision;
+only one embedding/block at a time is promoted onto the execution device, TF32 is disabled,
+and the forward stops after block 16. This avoids placing the entire 6.9B model in FP32 on
+the 4090. It needs host RAM for one BF16 model plus loading overhead, and the first failing
+BF16 check takes extra checkpoint loading/transfer time. The original elementwise tolerances
+are unchanged for the FP32 check. A genuine FP32 mismatch still stops evaluation.
+
+Even a correct FP32 hook mapping does not establish that BF16 errors are harmless to every
+sparse encoder. A maximum per-token relative L2 discrepancy above 5% is rejected, not rescued
+by the reference. This is a safety bound, not a quality guarantee. A successful fallback is
+explicitly labeled `verification: float32_reference_on_bf16_weights`, with
+`elementwise_allclose: false` and both precision diagnostics retained. Probe caches still use
+the originally requested LLM precision; this fallback does not switch the experiment to FP32.
+After updating, retry the same smoke command. If it still fails, inspect/share
+`RUN_DIR/probe-smoke-k1-k16/hook_parity.json` instead of bypassing the preflight.
+
 ## 4. Evaluate and visualize
 
 ```bash

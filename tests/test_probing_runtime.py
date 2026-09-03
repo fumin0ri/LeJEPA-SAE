@@ -119,7 +119,7 @@ def test_parity_releases_hf_before_loading_tl_and_uses_identical_tokens(monkeypa
 
     def load_hf(name, **kwargs):
         assert name == probing.HF_MODEL_NAME
-        assert kwargs["torch_dtype"] == torch.float32
+        assert kwargs.get("dtype", kwargs.get("torch_dtype")) == torch.float32
         model = FakeHF()
         refs.append(weakref.ref(model))
         return model

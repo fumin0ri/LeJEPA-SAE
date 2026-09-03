@@ -14,6 +14,7 @@ import torch
 from lejepa_sae import probing
 from lejepa_sae.config import ExperimentConfig
 from lejepa_sae.models import build_model
+from lejepa_sae.probe_parity import hf_streamed_residual, tl_streamed_residual
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -65,6 +66,18 @@ def test_tiny_neox_layer16_hook_parity_without_weight_processing(dtype):
     _, cache = model.run_with_cache(tokens, names_filter=[probing.HOOK_NAME], stop_at_layer=17)
     result = probing.assert_hook_parity(hf_residual, cache[probing.HOOK_NAME])
     assert result["max_abs_error"] < 0.005
+    # Exercise the exact fallback with real HF/TL modules. No complete model is
+    # promoted: all original CPU parameter storage/dtypes must be restored.
+    hf_before = {name: p.clone() for name, p in hf.named_parameters()}
+    tl_before = {name: p.clone() for name, p in model.named_parameters()}
+    hf_reference = hf_streamed_residual(hf, tokens, "cpu")
+    tl_reference = tl_streamed_residual(model, tokens, "cpu")
+    probing.assert_hook_parity(hf_reference, tl_reference)
+    for name, parameter in hf.named_parameters():
+        torch.testing.assert_close(parameter, hf_before[name], rtol=0, atol=0)
+    for name, parameter in model.named_parameters():
+        torch.testing.assert_close(parameter, tl_before[name], rtol=0, atol=0)
+    assert model.cfg.dtype == dtype and model.cfg.device == "cpu"
 
 
 @pytest.mark.parametrize("model_type", ["proposed", "batch_topk_sae"])

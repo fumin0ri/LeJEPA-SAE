@@ -12,12 +12,14 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
+from packaging.version import Version
 from torch import nn
 
 from .comparison import METRIC_ALIASES, _canonical_metric
 from .config import ExperimentConfig, load_config
 from .evaluate import load_model
 from .models import JumpReLUSAE, SAEBase
+from .probe_parity import hf_streamed_residual, tl_streamed_residual
 from .train import autocast_context
 
 DEFAULT_KS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
@@ -121,11 +123,66 @@ def assert_hook_parity(
     }
 
 
+def _parity_diagnostics(hf, tl) -> dict[str, Any]:
+    if hf.shape != tl.shape or not torch.isfinite(hf).all() or not torch.isfinite(tl).all():
+        raise ValueError("Hook parity requires equal shapes and finite activations")
+    hf, tl = hf.float(), tl.float()
+    difference = hf - tl
+    relative_per_token = difference.norm(dim=-1) / hf.norm(dim=-1).clamp_min(1e-12)
+    return {
+        "max_abs_error": float(difference.abs().max()),
+        "mean_abs_error": float(difference.abs().mean()),
+        "reference_max_abs": float(hf.abs().max()),
+        "reference_rms": float(hf.square().mean().sqrt()),
+        "relative_rmse": float(difference.norm() / hf.norm().clamp_min(1e-12)),
+        "max_token_relative_l2": float(relative_per_token.max()),
+        "elementwise_allclose": torch.allclose(hf, tl, atol=5e-3, rtol=5e-3),
+    }
+
+
+def _load_hf_parity_model(device, dtype):
+    import transformers
+
+    # ``dtype`` supersedes torch_dtype in recent transformers, but keep the
+    # project's older supported versions working as well.
+    key = "dtype" if Version(transformers.__version__) >= Version("4.56") else "torch_dtype"
+    return (
+        transformers.AutoModelForCausalLM.from_pretrained(
+            HF_MODEL_NAME, **{key: dtype}, low_cpu_mem_usage=True
+        )
+        .to(device)
+        .eval()
+    )
+
+
 @torch.inference_mode()
-def run_hook_parity_preflight(device: str, llm_precision: str = "auto") -> dict[str, Any]:
+def _float32_parity_reference(tokens, device, storage_dtype):
+    # Both loaders round the same original checkpoint to storage_dtype. This
+    # tests implementation/hook equivalence, not a different set of weights.
+    hf_model = _load_hf_parity_model("cpu", storage_dtype)
+    try:
+        hf = hf_streamed_residual(hf_model, tokens, device)
+    finally:
+        del hf_model
+        _release_memory(device)
+    tl_model = _load_transformer_lens("cpu", storage_dtype)
+    try:
+        tl = tl_streamed_residual(tl_model, tokens, device)
+    finally:
+        del tl_model
+        _release_memory(device)
+    return hf, tl
+
+
+@torch.inference_mode()
+def run_hook_parity_preflight(
+    device: str,
+    llm_precision: str = "auto",
+    diagnostics_path: str | Path | None = None,
+) -> dict[str, Any]:
     """Verify that extraction's HF block output is the sae-probes TransformerLens hook."""
     try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoTokenizer
     except ImportError as error:  # pragma: no cover - optional heavyweight dependency
         raise RuntimeError(
             "Install probing dependencies with: pip install -e '.[probes]'"
@@ -134,9 +191,7 @@ def run_hook_parity_preflight(device: str, llm_precision: str = "auto") -> dict[
     dtype = resolve_llm_dtype(device, llm_precision)
     tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_NAME)
     tokens = tokenizer("Hook parity preflight for LeJEPA-SAE.", return_tensors="pt").input_ids
-    hf_model = (
-        AutoModelForCausalLM.from_pretrained(HF_MODEL_NAME, torch_dtype=dtype).to(device).eval()
-    )
+    hf_model = _load_hf_parity_model(device, dtype)
     try:
         hf_output = hf_model(tokens.to(device), output_hidden_states=True)
         hf_activation = hf_output.hidden_states[17].float().cpu()
@@ -155,10 +210,42 @@ def run_hook_parity_preflight(device: str, llm_precision: str = "auto") -> dict[
     finally:
         del tl_model
         _release_memory(device)
-    result = assert_hook_parity(hf_activation, tl_activation)
+    result = _parity_diagnostics(hf_activation, tl_activation)
     result.update(
         {"model": MODEL_NAME, "hook": HOOK_NAME, "processing": "none", "dtype": str(dtype)}
     )
+    result["passed"] = False
+
+    def persist():
+        if diagnostics_path is not None:
+            _write_json(Path(diagnostics_path), result)
+
+    persist()
+    if result["elementwise_allclose"]:
+        result.update(passed=True, verification="direct")
+    elif dtype == torch.bfloat16:
+        print(
+            "BF16 elementwise parity differs; checking identical rounded weights with "
+            "layer-streamed FP32 arithmetic. "
+            f"relative_rmse={result['relative_rmse']:.6g}, "
+            f"max_token_relative_l2={result['max_token_relative_l2']:.6g}",
+            flush=True,
+        )
+        # A hook match in FP32 must not silently bless numerically unusable BF16
+        # activations. This is a safety bound, not a guarantee of probe invariance.
+        result["bf16_max_token_relative_l2_limit"] = 0.05
+        if result["max_token_relative_l2"] > 0.05:
+            persist()
+            raise ValueError("BF16 hook discrepancy exceeds the 5% per-token L2 safety bound")
+        hf_reference, tl_reference = _float32_parity_reference(tokens, device, dtype)
+        result["float32_reference"] = _parity_diagnostics(hf_reference, tl_reference)
+        persist()
+        # Do not widen the original allclose tolerances for the FP32 reference.
+        assert_hook_parity(hf_reference, tl_reference)
+        result.update(passed=True, verification="float32_reference_on_bf16_weights")
+    else:
+        assert_hook_parity(hf_activation, tl_activation)
+    persist()
     return result
 
 
@@ -409,7 +496,9 @@ def run_probes(
     adapter = ProbeSAEAdapter(load_model(config, checkpoint, "cpu"), config, prefix_width)
     print(f"Probe tasks={len(datasets)}, ks={ks}, smoke_test={smoke_test}", flush=True)
     if parity:
-        parity_result = run_hook_parity_preflight(config.train.device, llm_precision)
+        parity_result = run_hook_parity_preflight(
+            config.train.device, llm_precision, output / "hook_parity.json"
+        )
         _write_json(output / "hook_parity.json", parity_result)
     cache = prepare_activation_cache(
         model_cache_path,
