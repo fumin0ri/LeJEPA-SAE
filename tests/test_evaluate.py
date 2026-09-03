@@ -8,7 +8,7 @@ from safetensors.torch import save_file
 from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, TrainConfig
 from lejepa_sae.evaluate import evaluate
 from lejepa_sae.models import build_model
-from lejepa_sae.reporting import _format_metric, load_training_history
+from lejepa_sae.reporting import _format_metric, load_training_history, write_evaluation_report
 
 
 class FakeTokenizer:
@@ -214,3 +214,35 @@ def test_transition_units_and_legacy_history(tmp_path):
     history = load_training_history(path)
     assert len(history) == 1
     assert "off_to_on" not in history[0]
+
+
+def test_rate_training_curves_and_csv(tmp_path):
+    records = [
+        {
+            "kind": "train", "step": 20, "base_loss": 3.0, "rate_loss": 0.03,
+            "global_rate_loss": 0.04, "local_rate_loss": 0.02,
+            "rate_contribution": 0.009, "rate_global_active_fraction": 0.03,
+            "rate_local_active_fraction": 0.06, "rate_scale": 0.8,
+            "base_preactivation_grad_rms": 1e-6, "rate_preactivation_grad_rms": 1e-7,
+            "rate_to_base_grad_ratio": 0.1, "support_disagreement": 0.05,
+        },
+        {"kind": "validation", "step": 20, "rate_loss": 0.02, "rate_contribution": 0.006},
+    ]
+    path = tmp_path / "metrics.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in records), encoding="utf-8")
+    history = load_training_history(path)
+    write_evaluation_report(
+        tmp_path,
+        {"mean_active_fraction": 0.05, "mean_feature_std": 0.4, "dead_feature_fraction": 0.1},
+        [{"feature": 0, "active_fraction": 0.05, "mean": 0.1, "std": 0.4, "maximum": 2}],
+        [{"feature": 0, "examples": []}],
+        history,
+    )
+    chart = (tmp_path / "training_curves.svg").read_text(encoding="utf-8")
+    assert "Target-rate penalty" in chart
+    assert "Rate / base preactivation gradient RMS" in chart
+    with (tmp_path / "training_history.csv").open(encoding="utf-8", newline="") as handle:
+        exported = list(csv.DictReader(handle))
+    assert float(exported[0]["rate_loss"]) == 0.03
+    assert float(exported[0]["rate_to_base_grad_ratio"]) == 0.1
+    assert exported[1]["rate_to_base_grad_ratio"] == ""

@@ -29,6 +29,7 @@ from .losses import (
     l1_sparsity_metric,
     random_axis_indices,
     rectified_lp_rdm_regularization,
+    target_rate_regularization,
 )
 from .models import JumpReLUSAE, SAEBase, build_model
 from .views import sample_dimension_masks
@@ -172,7 +173,10 @@ def compute_loss(
     residual_views, masks = stack_dimension_views(
         token_residuals, dimension_masks, include_global=True
     )
-    feature_views = model(residual_views, masks).features
+    output = model(residual_views, masks)
+    feature_views = output.features
+    preactivations = output.preactivations if config.loss.rate_weight > 0 else None
+    del output
     global_features = feature_views[0]
     local_features = feature_views[1:]
     invariance = F.mse_loss(
@@ -195,7 +199,17 @@ def compute_loss(
         ),
         axis_indices=axis_indices,
     )
-    loss = config.loss.invariance_weight * invariance + config.loss.lambda_rdm * rdm.loss
+    base_loss = config.loss.invariance_weight * invariance + config.loss.lambda_rdm * rdm.loss
+    loss = base_loss
+    rate = None
+    if config.loss.rate_weight > 0:
+        rate = target_rate_regularization(
+            preactivations,
+            config.loss.expected_l0_fraction,
+            config.loss.rate_temperature,
+            config.loss.rate_scale_floor,
+        )
+        loss = loss + config.loss.rate_weight * rate.loss
     if not torch.isfinite(loss):
         raise FloatingPointError("proposed model produced a non-finite loss")
     view_distribution_losses = (
@@ -223,6 +237,33 @@ def compute_loss(
             config.loss.expected_l0_fraction,
             device=feature_views.device,
         )
+    if rate is not None:
+        metrics.update({
+            "base_loss": base_loss.detach(),
+            "rate_loss": rate.loss.detach(),
+            "global_rate_loss": rate.view_losses[0].detach(),
+            "local_rate_loss": rate.view_losses[1:].mean().detach(),
+            "rate_contribution": (config.loss.rate_weight * rate.loss).detach(),
+            "rate_global_active_fraction": rate.rates[0].detach(),
+            "rate_local_active_fraction": rate.rates[1:].mean().detach(),
+            "rate_scale": rate.scale,
+        })
+        if (
+            include_diagnostics
+            and config.loss.rate_gradient_diagnostics
+            and torch.is_grad_enabled()
+        ):
+            base_grad = torch.autograd.grad(base_loss, preactivations, retain_graph=True)[0]
+            rate_grad = torch.autograd.grad(
+                config.loss.rate_weight * rate.loss, preactivations, retain_graph=True
+            )[0]
+            base_rms = base_grad.detach().float().square().mean().sqrt()
+            rate_rms = rate_grad.detach().float().square().mean().sqrt()
+            metrics.update({
+                "base_preactivation_grad_rms": base_rms,
+                "rate_preactivation_grad_rms": rate_rms,
+                "rate_to_base_grad_ratio": rate_rms / base_rms.clamp_min(1e-12),
+            })
     if not include_diagnostics:
         return loss, metrics
 
@@ -281,6 +322,7 @@ def activation_transition_metrics(
         "local_active_fraction": local_active,
         "local_global_active_fraction_gap": local_active - global_active,
         "transition_rate_gap": off_to_on - on_to_off,
+        "support_disagreement": off_to_on + on_to_off,
     }
 
 

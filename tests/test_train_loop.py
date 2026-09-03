@@ -9,17 +9,21 @@ from lejepa_sae.train import train
 
 
 @pytest.mark.parametrize(
-    ("model_type", "mask_scaling"),
+    ("model_type", "mask_scaling", "rate_activation"),
     [
-        ("proposed", "inverted"),
-        ("proposed", "sqrt"),
-        ("proposed", "none"),
-        ("batch_topk_sae", "inverted"),
-        ("jump_relu_sae", "inverted"),
-        ("matryoshka_sae", "inverted"),
+        ("proposed", "inverted", None),
+        ("proposed", "sqrt", None),
+        ("proposed", "none", None),
+        ("proposed", "sqrt", "relu"),
+        ("proposed", "sqrt", "relu_forward_leaky_backward"),
+        ("batch_topk_sae", "inverted", None),
+        ("jump_relu_sae", "inverted", None),
+        ("matryoshka_sae", "inverted", None),
     ],
 )
-def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, mask_scaling):
+def test_end_to_end_cpu_training_and_checkpoint(
+    tmp_path, model_type, mask_scaling, rate_activation
+):
     activation_dir = tmp_path / "activations"
     shards = []
     for split_index, split in enumerate(("train", "validation", "test")):
@@ -85,12 +89,18 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, mask_scali
     config.baseline.k_aux = 4
     config.baseline.dead_feature_window_tokens = 2
     config.baseline.matryoshka_group_sizes = [2, 2, 4, 4, 4]
+    if rate_activation:
+        config.model.feature_activation = rate_activation
+        config.loss.rate_weight = 1.0
+        config.loss.rate_gradient_diagnostics = True
+        config.loss.expected_l0_fraction = 0.05
     checkpoint = train(config)
 
     assert checkpoint.exists()
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     assert state["step"] == 2
     assert state["config"]["model"]["mask_scaling"] == mask_scaling
+    assert state["config"]["loss"]["rate_weight"] == config.loss.rate_weight
     run_dir = tmp_path / f"run-{model_type}"
     assert (run_dir / "config.resolved.yaml").exists()
     training_plan = json.loads((run_dir / "training_plan.json").read_text())
@@ -117,9 +127,16 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, mask_scali
                 record["local_global_active_fraction_gap"], abs=1e-7
             )
         assert all(
-            record["expected_l0_fraction"] == pytest.approx(0.009765625)
+            record["expected_l0_fraction"] == pytest.approx(config.loss.expected_l0_fraction)
             for record in train_records
         )
+        if rate_activation:
+            assert all("rate_loss" in record for record in records)
+            assert all("rate_to_base_grad_ratio" in record for record in train_records)
+            for record in records:
+                assert record["loss"] == pytest.approx(
+                    record["base_loss"] + record["rate_contribution"], rel=1e-6
+                )
     else:
         assert all("off_to_on" not in record for record in records)
         assert all("reconstruction" in record for record in train_records)
@@ -132,7 +149,7 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, mask_scali
         if model_type in {"batch_topk_sae", "matryoshka_sae"}:
             assert (run_dir / "threshold_calibration.json").exists()
             assert torch.isfinite(state["model"]["calibrated_threshold"])
-    if model_type == "batch_topk_sae":
+    if model_type == "batch_topk_sae" or rate_activation:
         config.train.resume_from = str(checkpoint)
         config.train.max_steps = 3
         resumed = train(config)

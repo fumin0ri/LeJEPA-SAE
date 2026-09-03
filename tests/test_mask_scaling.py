@@ -2,6 +2,7 @@ import itertools
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -109,7 +110,8 @@ def _native_bash():
 
 @pytest.mark.parametrize("mode", ["inverted", "sqrt", "none"])
 @pytest.mark.parametrize("script", ["run_proposed.sh", "run_leaky_backward.sh"])
-def test_script_passes_mask_scaling_and_separates_output_paths(mode, script):
+@pytest.mark.parametrize("rate_weight", ["0", "0.3"])
+def test_script_passes_mask_scaling_and_separates_output_paths(mode, script, rate_weight):
     environment = os.environ.copy()
     environment.update(
         MASK_SCALING=mode,
@@ -119,6 +121,8 @@ def test_script_passes_mask_scaling_and_separates_output_paths(mode, script):
         EXPECTED_L0_FRACTION="0.009765625",
         AXIS_PROJECTIONS="512",
         LEAKY_BACKWARD_SLOPE="0.01",
+        RATE_WEIGHT=rate_weight,
+        RATE_TEMPERATURE="0.2", RATE_SCALE_FLOOR="0.000001", RATE_GRAD_DIAGNOSTICS="true",
     )
     completed = subprocess.run(
         [
@@ -137,7 +141,13 @@ def test_script_passes_mask_scaling_and_separates_output_paths(mode, script):
     arguments = completed.stdout.splitlines()
     assert f"model.mask_scaling={mode}" in arguments
     assert "model.dimension_keep_fraction=0.5" in arguments
+    assert f"loss.rate_weight={rate_weight}" in arguments
+    assert "loss.rate_temperature=0.2" in arguments
+    assert "loss.rate_gradient_diagnostics=true" in arguments
     output = next(arg for arg in arguments if arg.startswith("train.output_dir="))
+    if rate_weight != "0":
+        assert output.endswith("-rate0.3-tau0.2-floor0.000001")
+        output = output.removesuffix("-rate0.3-tau0.2-floor0.000001")
     if mode == "inverted":
         assert "-mask-" not in output
     else:
@@ -145,3 +155,82 @@ def test_script_passes_mask_scaling_and_separates_output_paths(mode, script):
     if script == "run_leaky_backward.sh":
         assert "model.feature_activation=relu_forward_leaky_backward" in arguments
     assert "train.resume_from=null" in arguments
+
+
+@pytest.mark.parametrize("mode", ["base", "rate", "both"])
+def test_rate_comparison_launcher_same_settings_fresh_outputs(tmp_path, mode):
+    environment = os.environ.copy()
+    root = tmp_path / "rate runs"
+    environment.update(
+        RATE_COMPARISON_ROOT=root.as_posix(),
+        RATE_WEIGHT="0.2", RATE_TEMPERATURE="0.1", RATE_SCALE_FLOOR="0.000001",
+        EXPECTED_L0_FRACTION="0.05", LEAKY_BACKWARD_SLOPE="0.1", MASK_SCALING="sqrt",
+        DIMENSION_KEEP_FRACTION="0.5", TRAIN_SEED="42", MAX_STEPS="2",
+        RATE_GRAD_DIAGNOSTICS="true",
+        PATH=str(Path(sys.executable).parent) + os.pathsep + environment["PATH"],
+    )
+    completed = subprocess.run(
+        [
+            _native_bash(), "-c",
+            'lejepa-train() { printf "__RUN__\\n"; printf "%s\\n" "$@"; }; '
+            'export -f lejepa-train; exec "$BASH" "$@"',
+            "rate-test", "scripts/run_rate_comparison.sh", mode,
+        ],
+        cwd=Path(__file__).resolve().parents[1], env=environment,
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    runs = [part.splitlines() for part in completed.stdout.split("__RUN__\n")[1:]]
+    assert len(runs) == (2 if mode == "both" else 1)
+    for index, arguments in enumerate(runs):
+        is_base = mode == "base" or (mode == "both" and index == 0)
+        assert f"loss.rate_weight={'0' if is_base else '0.2'}" in arguments
+        assert f"train.output_dir={root.as_posix()}/{'base' if is_base else 'rate'}" in arguments
+        assert "loss.expected_l0_fraction=0.05" in arguments
+        assert "model.leaky_backward_slope=0.1" in arguments
+        assert "model.mask_scaling=sqrt" in arguments
+        assert "model.dimension_keep_fraction=0.5" in arguments
+        assert "train.seed=42" in arguments
+        assert "train.max_steps=2" in arguments
+        assert "train.resume_from=null" in arguments
+    if mode == "both":
+        def common(args):
+            return [
+                arg for arg in args
+                if not arg.startswith(("loss.rate_weight=", "train.output_dir="))
+            ]
+
+        assert common(runs[0]) == common(runs[1])
+
+
+def test_rate_comparison_refuses_existing_destination_before_any_training(tmp_path):
+    root = tmp_path / "existing"
+    (root / "rate").mkdir(parents=True)
+    environment = os.environ.copy()
+    environment.update(
+        RATE_COMPARISON_ROOT=root.as_posix(), RATE_WEIGHT="1",
+        PATH=str(Path(sys.executable).parent) + os.pathsep + environment["PATH"],
+    )
+    completed = subprocess.run(
+        [_native_bash(), "scripts/run_rate_comparison.sh", "both"],
+        cwd=Path(__file__).resolve().parents[1], env=environment,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode != 0
+    assert "Refusing existing output" in completed.stderr
+    assert not (root / "base").exists()
+
+
+def test_rate_comparison_rejects_zero_coefficient_before_training(tmp_path):
+    environment = os.environ.copy()
+    environment.update(
+        RATE_COMPARISON_ROOT=tmp_path.as_posix(), RATE_WEIGHT="0",
+        PATH=str(Path(sys.executable).parent) + os.pathsep + environment["PATH"],
+    )
+    completed = subprocess.run(
+        [_native_bash(), "scripts/run_rate_comparison.sh", "both"],
+        cwd=Path(__file__).resolve().parents[1], env=environment,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode != 0
+    assert "RATE_WEIGHT must be finite and positive" in completed.stderr
+    assert not (tmp_path / "base").exists()

@@ -18,6 +18,50 @@ class RDMRegularizationOutput:
     axis_view_losses: torch.Tensor
 
 
+@dataclass(frozen=True)
+class RateRegularizationOutput:
+    loss: torch.Tensor
+    view_losses: torch.Tensor
+    rates: torch.Tensor
+    scale: torch.Tensor
+
+
+def straight_through_gate(preactivations: torch.Tensor, temperature: torch.Tensor) -> torch.Tensor:
+    """Exact 0/1 float32 forward, sigmoid surrogate backward directly through preactivation."""
+    pre = preactivations.float()
+    soft = torch.sigmoid(pre / temperature)
+    hard = (pre > 0).float()
+    return hard + (soft - soft.detach())
+
+
+def target_rate_regularization(
+    preactivations: torch.Tensor,
+    target: float,
+    temperature: float = 0.1,
+    scale_floor: float = 1e-6,
+) -> RateRegularizationOutput:
+    """Per-view hard rate penalty, balanced global : local group = 1 : 1.
+
+    Input is [1 + V, B, D]. Each penalty is (r-rho)^2 / (2*rho*(1-rho));
+    no rate clamping, so the surrogate still has a signal at hard rates 0 and 1.
+    The shared scale is detached global preactivation std (population convention).
+    """
+    if preactivations.ndim != 3 or preactivations.shape[0] < 2 or preactivations.numel() == 0:
+        raise ValueError("Expected nonempty [1 + V, B, D] preactivations with V >= 1")
+    if not 0 < target < 1:
+        raise ValueError("target must be in (0, 1)")
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError("temperature must be finite and positive")
+    if not math.isfinite(scale_floor) or scale_floor <= 0:
+        raise ValueError("scale_floor must be finite and positive")
+    scale = preactivations[0].detach().float().std(unbiased=False).clamp_min(scale_floor)
+    gates = straight_through_gate(preactivations, temperature * scale)
+    rates = gates.mean(dim=(-2, -1))
+    view_losses = (rates - target).square() / (2 * target * (1 - target))
+    loss = 0.5 * view_losses[0] + 0.5 * view_losses[1:].mean()
+    return RateRegularizationOutput(loss, view_losses, rates, scale)
+
+
 def generalized_gaussian_unit_variance_sigma(lp_norm_parameter: float) -> float:
     """Scale for unit pre-rectification variance under the paper's GN_p convention."""
     if lp_norm_parameter <= 0:

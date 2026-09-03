@@ -164,6 +164,87 @@ guarantee equal encoder preactivation variance when coordinates are correlated. 
 it also changes the expected local linear projection: it is `sqrt(q)` times the global linear
 term (`q` times for `none`, before adding encoder bias). These are distinct training objectives.
 
+### Target-rate-only ablation (no support or margin loss)
+
+The original proposed objective is unchanged by default (`loss.rate_weight: 0`). The opt-in
+ablation adds a target-anchored rate penalty, sharing `loss.expected_l0_fraction = rho` with RDMReg:
+
+```text
+ell(r) = (r - rho)^2 / (2 * rho * (1 - rho))
+L_rate = 0.5 * ell(r_global) + 0.5 * mean_v ell(r_local_v)
+L_total = 25 * L_invariance + 125 * L_RDM + rate_weight * L_rate
+```
+
+The 25/125 base weights remain configurable. Each `r` averages over that view's batch and feature
+axes. Local penalties are computed separately before averaging, not after pooling their rates.
+This controls the view-level mean, not an exact per-token TopK. The rate penalty is normalized
+squared error, the second-order approximation to Bernoulli KL at the target. It remains finite
+at rates 0 and 1 without clamping the rate or blocking its surrogate gradient.
+
+Rates use hard-forward/sigmoid-backward gates directly on preactivations (not ReLU outputs):
+
+```text
+scale = stop_gradient(std(global_preactivations, unbiased=False)).clamp_min(rate_scale_floor)
+soft = sigmoid(a.float() / (rate_temperature * scale))
+gate = (a > 0).float() + (soft - stop_gradient(soft))
+```
+
+Gate calculations and reductions use float32. The default temperature multiplier is 0.1 and
+scale floor is 1e-6; the same detached global scale is used for all local views. Both branches
+receive rate gradients directly through preactivation, independently of the ReLU backward
+choice. Sigmoid saturation can still suppress gradients far from zero: this is not a guarantee
+of dead-feature revival. Weight zero skips gate/scale computations and preserves the old
+loss, gradients, RNG usage, and state-dict format.
+
+To compare the current `sqrt(q), q=0.5, slope=0.1, rho=0.05` experiment against `+ rate`:
+
+```bash
+RATE_WEIGHT=1.0 bash scripts/run_rate_comparison.sh
+```
+
+This runs **only two proposed-model pilots**, sequentially, with shared seed 42, initialization,
+data-order seed, and training settings. Both use ReLU-forward/leaky-backward with slope 0.1.
+Each pilot runs 10,000 optimizer steps by default, not a full 100M-token epoch. It uses separate
+`base/` and `rate/` directories below `runs/rate-ablation/`; it checks all selected destinations
+before starting and refuses existing ones. Neither run resumes an old checkpoint. `base` or
+`rate` as the first argument runs only that condition. SAE baselines and the 15-run comparison
+pipeline are not launched or modified.
+
+`RATE_WEIGHT=1.0` is an **uncalibrated pilot starting value**, not a demonstrated optimum. The
+comparison launcher enables gradient diagnostics at train log steps: `rate_to_base_grad_ratio`
+is RMS(weighted rate gradient) / RMS(weighted base gradient), measured over the complete
+preactivation tensor. A ratio around 0.05–0.1 is an initial heuristic, not a constraint or an
+automatic weight adjustment. The diagnostic adds backward work on log steps only; disable it
+with `RATE_GRAD_DIAGNOSTICS=false`. Validation never computes these gradients.
+
+For example, override the pilot settings and give the pair a new output root:
+
+```bash
+RATE_WEIGHT=0.3 RATE_TEMPERATURE=0.1 TRAIN_SEED=43 MAX_STEPS=10000 \
+RATE_COMPARISON_ROOT=runs/rate-ablation/seed43-weight03 \
+bash scripts/run_rate_comparison.sh both
+```
+
+Other shared overrides include `EXPECTED_L0_FRACTION`, `DIMENSION_KEEP_FRACTION`, `MASK_SCALING`,
+`LEAKY_BACKWARD_SLOPE`, `FEATURE_DIM`, `BATCH_SIZE`, `GRADIENT_ACCUMULATION_STEPS`,
+`RATE_SCALE_FLOOR`, and `CONFIG`. Direct training supports `--set loss.rate_weight=...`,
+`--set loss.rate_temperature=...`, `--set loss.rate_scale_floor=...`, and
+`--set loss.rate_gradient_diagnostics=true`. The existing `run_proposed.sh` and
+`run_leaky_backward.sh` also accept these rate environment variables; enabled-rate runs append
+a weight/temperature/floor suffix to their default output path. Use the dedicated comparison
+launcher for fresh paired outputs. Rate loss is rejected for SAE baselines or when
+`expected_l0_fraction` is null.
+
+Enabled-rate logs include `rate_loss`, `global_rate_loss`, `local_rate_loss`, `rate_contribution`,
+`base_loss`, `rate_global_active_fraction`, `rate_local_active_fraction`, and `rate_scale`.
+These are collected every loss batch (train logs average the interval), whereas the existing
+`global_active_fraction`/`local_active_fraction` diagnostics sample the final microbatch of a log
+step. Compare matched aggregation scopes. Evaluation reports made with each run's resolved config
+include the rate-loss and optional gradient-ratio training curves and CSV fields.
+Judge the ablation by target-rate error, `support_disagreement = off_to_on + on_to_off`,
+global/local MSE, RDMReg, feature std, and dead-feature diagnostics, not sparsity gap alone.
+No Jaccard loss, margin loss, or automatic hyperparameter sweep is included.
+
 ### Global/local gate-transition diagnostics
 
 Training and validation log `off_to_on = P(a_G <= 0, a_L > 0)` and

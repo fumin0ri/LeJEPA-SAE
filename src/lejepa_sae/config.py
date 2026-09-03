@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -48,6 +49,10 @@ class LossConfig:
     projection_vectors_type: str = "random"
     invariance_weight: float = 25.0
     reconstruction_weight: float = 1.0
+    rate_weight: float = 0.0
+    rate_temperature: float = 0.1
+    rate_scale_floor: float = 1e-6
+    rate_gradient_diagnostics: bool = False
 
 
 @dataclass
@@ -137,6 +142,21 @@ class ExperimentConfig:
             raise ValueError("loss.axis_projections must be in [1, model.feature_dim]")
         if self.loss.axis_weight <= 0:
             raise ValueError("loss.axis_weight must be positive")
+        if not math.isfinite(self.loss.rate_weight) or self.loss.rate_weight < 0:
+            raise ValueError("loss.rate_weight must be finite and non-negative")
+        for name in ("rate_temperature", "rate_scale_floor"):
+            value = getattr(self.loss, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"loss.{name} must be finite and positive")
+        if not isinstance(self.loss.rate_gradient_diagnostics, bool):
+            raise ValueError("loss.rate_gradient_diagnostics must be boolean")
+        if self.loss.rate_weight > 0:
+            if self.model.type != "proposed":
+                raise ValueError("rate loss is only supported for model.type=proposed")
+            if self.loss.expected_l0_fraction is None or not (
+                0 < self.loss.expected_l0_fraction < 1
+            ):
+                raise ValueError("rate loss requires loss.expected_l0_fraction in (0, 1)")
         if self.model.type == "proposed":
             if self.loss.target_distribution != "rectified_lp_distribution":
                 raise ValueError(

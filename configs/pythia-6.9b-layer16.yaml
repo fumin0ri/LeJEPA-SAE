@@ -29,6 +29,10 @@ loss:
   mode_of_sigma: sigma_GN
   projection_vectors_type: random
   reconstruction_weight: 1.0
+  rate_weight: 0.0  # opt-in normalized-MSE target-rate ablation; no Jaccard or margin
+  rate_temperature: 0.1
+  rate_scale_floor: 0.000001
+  rate_gradient_diagnostics: false
 
 baseline:
   k: null

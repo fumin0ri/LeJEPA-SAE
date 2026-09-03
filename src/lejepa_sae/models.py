@@ -85,6 +85,9 @@ class SparseLinearFeatureEncoder(nn.Module):
         dimension_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         preactivations = self.encoder(self.prepare_input(residuals, dimension_mask))
+        return self.activate_features(preactivations)
+
+    def activate_features(self, preactivations: torch.Tensor) -> torch.Tensor:
         if self.feature_activation == "relu":
             return preactivations.relu()
         if self.feature_activation == "relu_forward_leaky_backward":
@@ -102,7 +105,11 @@ class ProposedModel(SparseLinearFeatureEncoder):
         residuals: torch.Tensor,
         dimension_mask: torch.Tensor | None = None,
     ) -> ModelOutput:
-        return ModelOutput(features=self.encode_features(residuals, dimension_mask))
+        preactivations = self.encoder(self.prepare_input(residuals, dimension_mask))
+        return ModelOutput(
+            features=self.activate_features(preactivations),
+            preactivations=preactivations,
+        )
 
 
 class _JumpReLU(torch.autograd.Function):

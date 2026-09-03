@@ -24,6 +24,7 @@ METRIC_LABELS = {
     "on_to_off": ("ON → OFF", "P(a_G > 0, a_L ≤ 0); fraction of all paired coordinates"),
     "local_global_active_fraction_gap": ("Local − global active fraction", "Sparsity gap in percentage points"),
     "transition_rate_gap": ("OFF→ON − ON→OFF", "Must equal local − global active fraction, up to rounding"),
+    "support_disagreement": ("Support disagreement", "OFF→ON + ON→OFF; fraction of paired coordinates that flip"),
 }
 
 
@@ -32,7 +33,7 @@ def _format_metric(key: str, value: float) -> str:
         return f"{int(value):,}"
     if key in {"local_global_active_fraction_gap", "transition_rate_gap"}:
         return f"{100 * value:+.3f} pp"
-    if "fraction" in key or key in {"support_jaccard", "off_to_on", "on_to_off"}:
+    if "fraction" in key or key in {"support_jaccard", "off_to_on", "on_to_off", "support_disagreement"}:
         return f"{value:.2%}"
     return f"{value:.6g}"
 
@@ -131,6 +132,18 @@ TRAINING_HISTORY_FIELDS = [
     "on_to_off",
     "local_global_active_fraction_gap",
     "transition_rate_gap",
+    "support_disagreement",
+    "base_loss",
+    "rate_loss",
+    "global_rate_loss",
+    "local_rate_loss",
+    "rate_contribution",
+    "rate_global_active_fraction",
+    "rate_local_active_fraction",
+    "rate_scale",
+    "base_preactivation_grad_rms",
+    "rate_preactivation_grad_rms",
+    "rate_to_base_grad_ratio",
     "invariance",
     "random_distribution",
     "axis_distribution",
@@ -306,6 +319,24 @@ def write_training_curves_svg(
             ],
         ),
     ]
+    if any("rate_loss" in row for row in history):
+        panels.extend([
+            (
+                "Target-rate penalty",
+                True,
+                [
+                    ("rate_loss", "train", "Raw train", "#2563eb"),
+                    ("rate_loss", "validation", "Raw val", "#0891b2"),
+                    ("rate_contribution", "train", "Weighted tr", "#ea580c"),
+                    ("rate_contribution", "validation", "Weighted val", "#be123c"),
+                ],
+            ),
+            (
+                "Rate / base preactivation gradient RMS",
+                False,
+                [("rate_to_base_grad_ratio", "train", "Rate / base", "#2563eb")],
+            ),
+        ])
     width, height = 1200, 40 + 360 * math.ceil(len(panels) / 2)
     panel_width, panel_height = 550, 300
     plot_left, plot_top, plot_width, plot_height = 62, 58, 458, 190
