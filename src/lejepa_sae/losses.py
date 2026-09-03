@@ -297,9 +297,20 @@ def rectified_lp_rdm_regularization(
     *,
     target_scale: float = 1.0,
     wasserstein_power: int = 2,
+    random_wasserstein_power: int | None = None,
+    axis_wasserstein_power: int | None = None,
 ) -> RDMRegularizationOutput:
-    """RDMReg: a single global view gets full weight; otherwise groups split 50:50."""
+    """RDMReg with optional per-term powers; None inherits wasserstein_power.
+
+    A single global view gets full weight; otherwise groups split 50:50.
+    """
     _validate_wasserstein_power(wasserstein_power)
+    random_power = (
+        wasserstein_power if random_wasserstein_power is None else random_wasserstein_power
+    )
+    axis_power = wasserstein_power if axis_wasserstein_power is None else axis_wasserstein_power
+    _validate_wasserstein_power(random_power)
+    _validate_wasserstein_power(axis_power)
     if not math.isfinite(target_scale) or target_scale <= 0:
         raise ValueError("target_scale must be finite and positive")
     if isinstance(feature_views, list):
@@ -350,10 +361,10 @@ def rectified_lp_rdm_regularization(
         # Scale the whole rectified distribution (including its shift), preserving rho.
         targets = targets * target_scale
     random_view_losses = sliced_wasserstein_with_projections(
-        feature_tensor, targets, projection_vectors, wasserstein_power=wasserstein_power
+        feature_tensor, targets, projection_vectors, wasserstein_power=random_power
     )
     axis_view_losses = sliced_wasserstein_on_axes(
-        feature_tensor, targets, axis_indices, wasserstein_power=wasserstein_power
+        feature_tensor, targets, axis_indices, wasserstein_power=axis_power
     )
     if random_view_losses.numel() == 1:
         random_loss = random_view_losses[0]

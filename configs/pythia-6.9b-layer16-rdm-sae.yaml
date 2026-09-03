@@ -19,6 +19,8 @@ loss:
   lambda_rdm: 1.0
   rdm_target_scale: 1.0
   rdm_wasserstein_power: 2  # 1: W1; 2: historical W2 squared (no square root)
+  rdm_random_wasserstein_power: null  # Per-term override; null inherits common power
+  rdm_axis_wasserstein_power: null
   rdm_gradient_diagnostics: true
   rdm_projections: 8192
   axis_projections: 512

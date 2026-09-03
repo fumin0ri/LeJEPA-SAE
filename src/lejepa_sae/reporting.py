@@ -162,6 +162,8 @@ TRAINING_HISTORY_FIELDS = [
     "distribution",
     "rdm_target_scale",
     "rdm_wasserstein_power",
+    "rdm_random_wasserstein_power",
+    "rdm_axis_wasserstein_power",
     "reconstruction_contribution",
     "rdm_contribution",
     "reconstruction_preactivation_grad_rms",

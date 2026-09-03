@@ -82,7 +82,10 @@ def test_default_w2_matches_historical_formula_exactly(dtype):
 
 @pytest.mark.parametrize("power", [1, 2])
 @pytest.mark.parametrize("views", [1, 3])
-def test_rdm_switch_controls_both_terms_and_preserves_view_weights(monkeypatch, power, views):
+@pytest.mark.parametrize("random_power, axis_power", [(None, None), (2, 1), (1, 2)])
+def test_rdm_switch_controls_both_terms_and_preserves_view_weights(
+    monkeypatch, power, views, random_power, axis_power
+):
     values = torch.arange(views * 12, dtype=torch.float32).reshape(views, 4, 3) / 7
     values.requires_grad_()
     targets = torch.tensor([[[0.0, 0, 2], [0, 1, 0], [3, 0, 0], [0, 0, 0]]]).expand_as(values)
@@ -95,36 +98,40 @@ def test_rdm_switch_controls_both_terms_and_preserves_view_weights(monkeypatch, 
     actual = rectified_lp_rdm_regularization(
         values, 2, 2, 4, 1, -1.6, projection_vectors=projections, axis_indices=axes,
         target_scale=1.5, wasserstein_power=power,
+        random_wasserstein_power=random_power, axis_wasserstein_power=axis_power,
     )
     scaled = 1.5 * targets
     expected = []
-    for left, right in (
-        (values @ projections.T, scaled @ projections.T),
-        (values[..., axes], scaled[..., axes]),
+    for left, right, term_power in (
+        (values @ projections.T, scaled @ projections.T, random_power or power),
+        (values[..., axes], scaled[..., axes], axis_power or power),
     ):
         differences = left.sort(dim=-2).values - right.sort(dim=-2).values
-        per_view = differences.abs().pow(power).mean(dim=(-2, -1))
+        per_view = differences.abs().pow(term_power).mean(dim=(-2, -1))
         expected.append(per_view[0] if views == 1 else 0.5 * (per_view[0] + per_view[1:].mean()))
     torch.testing.assert_close(actual.random_loss, expected[0])
     torch.testing.assert_close(actual.axis_loss, expected[1])
     torch.testing.assert_close(actual.loss, expected[0] + 4 * expected[1])
+    (expected_grad,) = torch.autograd.grad(expected[0] + 4 * expected[1], values)
     actual.loss.backward()
+    torch.testing.assert_close(values.grad, expected_grad)
     assert torch.isfinite(values.grad).all()
 
 
 def test_metric_switch_does_not_change_sampling_rng_and_bfloat16_backward():
     features = torch.randn(1, 16, 8, dtype=torch.bfloat16).relu().requires_grad_()
     states = []
-    for power in (1, 2):
+    for random_power, axis_power in ((1, 1), (2, 2), (2, 1), (1, 2)):
         generator = torch.Generator().manual_seed(42)
         result = rectified_lp_rdm_regularization(
-            features, 4, 4, 4, 1, -1.6, generator=generator, wasserstein_power=power,
+            features, 4, 4, 4, 1, -1.6, generator=generator,
+            random_wasserstein_power=random_power, axis_wasserstein_power=axis_power,
         )
         states.append(generator.get_state())
         assert result.loss.dtype == torch.float32 and torch.isfinite(result.loss)
         (grad,) = torch.autograd.grad(result.loss, features)
         assert torch.isfinite(grad).all()
-    assert torch.equal(*states)
+    assert all(torch.equal(states[0], state) for state in states[1:])
 
 
 @pytest.mark.parametrize("invalid", [0, 3, -1, 1.5, 2.0, True, None, "1"])
@@ -151,3 +158,38 @@ def test_config_override_roundtrip_keeps_target_shape_separate(tmp_path, power):
     reloaded = load_config(path)
     assert reloaded.loss.rdm_wasserstein_power == power
     assert reloaded.loss.lp_norm_parameter == 2
+
+
+@pytest.mark.parametrize("term", ["random", "axis"])
+@pytest.mark.parametrize("invalid", [0, 3, -1, 1.5, 2.0, True, "1"])
+def test_invalid_per_term_power_is_rejected(term, invalid):
+    config = ExperimentConfig()
+    setattr(config.loss, f"rdm_{term}_wasserstein_power", invalid)
+    with pytest.raises(ValueError, match=f"rdm_{term}_wasserstein_power"):
+        config.validate()
+    with pytest.raises(ValueError, match="wasserstein_power"):
+        rectified_lp_rdm_regularization(
+            torch.zeros(1, 4, 2), 2, 2, 1, 1, 0,
+            **{f"{term}_wasserstein_power": invalid},
+        )
+
+
+@pytest.mark.parametrize("power", [1, 2])
+@pytest.mark.parametrize("random_power, axis_power", [(None, None), (None, 1), (2, None), (2, 1)])
+def test_per_term_config_overrides_and_inheritance_roundtrip(
+    tmp_path, power, random_power, axis_power
+):
+    config = load_config("configs/pythia-6.9b-layer16-rdm-sae.yaml")
+    apply_overrides(config, [
+        f"loss.rdm_wasserstein_power={power}",
+        f"loss.rdm_random_wasserstein_power={random_power if random_power is not None else 'null'}",
+        f"loss.rdm_axis_wasserstein_power={axis_power if axis_power is not None else 'null'}",
+    ])
+    path = tmp_path / "mixed.yaml"
+    path.write_text(yaml.safe_dump(config.to_dict()), encoding="utf-8")
+    reloaded = load_config(path)
+    assert reloaded.loss.rdm_random_wasserstein_power == random_power
+    assert reloaded.loss.rdm_axis_wasserstein_power == axis_power
+    assert reloaded.loss.random_wasserstein_power == (random_power or power)
+    assert reloaded.loss.axis_wasserstein_power == (axis_power or power)
+    assert reloaded.loss.lp_norm_parameter == 1

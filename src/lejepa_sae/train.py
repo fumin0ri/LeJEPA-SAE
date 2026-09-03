@@ -102,6 +102,8 @@ def compute_rdm(
         axis_indices=axis_indices,
         target_scale=config.loss.rdm_target_scale,
         wasserstein_power=config.loss.rdm_wasserstein_power,
+        random_wasserstein_power=config.loss.rdm_random_wasserstein_power,
+        axis_wasserstein_power=config.loss.rdm_axis_wasserstein_power,
     )
 
 
@@ -177,6 +179,10 @@ def compute_loss(
                 "rdm_contribution": rdm_contribution.detach(),
                 "rdm_target_scale": loss.new_tensor(config.loss.rdm_target_scale),
                 "rdm_wasserstein_power": loss.new_tensor(config.loss.rdm_wasserstein_power),
+                "rdm_random_wasserstein_power": loss.new_tensor(
+                    config.loss.random_wasserstein_power
+                ),
+                "rdm_axis_wasserstein_power": loss.new_tensor(config.loss.axis_wasserstein_power),
             })
             if config.loss.expected_l0_fraction is not None:
                 metrics["expected_l0_fraction"] = loss.new_tensor(config.loss.expected_l0_fraction)

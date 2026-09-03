@@ -47,12 +47,20 @@ def forbidden(*_args, **_kwargs):
 
 @pytest.mark.parametrize("activation", ["relu", "relu_forward_leaky_backward"])
 @pytest.mark.parametrize("mixed", [False, True])
-@pytest.mark.parametrize("power", [1, 2])
+@pytest.mark.parametrize(
+    "power, random_power, axis_power", [(1, None, None), (2, None, None), (2, 2, 1)],
+)
 def test_rdm_sae_matches_direct_objective_and_parameter_gradients(
-    monkeypatch, activation, mixed, power
+    monkeypatch, activation, mixed, power, random_power, axis_power
 ):
     config = rdm_config()
     config.loss.rdm_wasserstein_power = power
+    config.loss.rdm_random_wasserstein_power = random_power
+    config.loss.rdm_axis_wasserstein_power = axis_power
+    if axis_power == 1:
+        config.loss.rdm_target_scale = 1.5
+        config.loss.axis_weight = 4
+        config.loss.lambda_rdm = config.loss.reconstruction_weight = 1
     config.model.feature_activation = activation
     config.model.leaky_backward_slope = 0.1
     model = build_model(config)
@@ -86,9 +94,10 @@ def test_rdm_sae_matches_direct_objective_and_parameter_gradients(
             output.reconstruction.float(), residuals[:, 0].float()
         )
         rdm = rectified_lp_rdm_regularization(
-            output.features.unsqueeze(0), 4, 4, 2, 1,
+            output.features.unsqueeze(0), 4, 4, config.loss.axis_weight, 1,
             generalized_gaussian_mean_shift_for_active_fraction(1, 0.05),
-            axis_indices=axes, target_scale=2, wasserstein_power=power,
+            axis_indices=axes, target_scale=config.loss.rdm_target_scale, wasserstein_power=power,
+            random_wasserstein_power=random_power, axis_wasserstein_power=axis_power,
         )
         distribution = config.loss.lambda_rdm * rdm.loss
         expected = reconstruction + distribution
@@ -97,6 +106,8 @@ def test_rdm_sae_matches_direct_objective_and_parameter_gradients(
     torch.testing.assert_close(metrics["rdm_contribution"], distribution.detach())
     torch.testing.assert_close(metrics["distribution"], rdm.loss.detach())
     assert actual.dtype == torch.float32
+    assert metrics["rdm_random_wasserstein_power"] == (random_power or power)
+    assert metrics["rdm_axis_wasserstein_power"] == (axis_power or power)
     assert shapes == [(6, 8)]
     assert not any("local" in name for name in metrics)
     assert {"invariance", "rate_loss", "auxk", "l0_penalty", "threshold"}.isdisjoint(metrics)
@@ -275,6 +286,8 @@ def test_rdm_diagnostic_curves_hide_absent_local_metrics(tmp_path):
         record["rdm_axis_preactivation_grad_rms"]
     )
     assert history[0]["rdm_wasserstein_power"] == 2
+    assert history[0]["rdm_random_wasserstein_power"] == 2
+    assert history[0]["rdm_axis_wasserstein_power"] == 2
     assert history[0]["rdm_to_reconstruction_grad_ratio"] == (
         record["rdm_to_reconstruction_grad_ratio"]
     )
@@ -288,8 +301,12 @@ def test_rdm_diagnostic_curves_hide_absent_local_metrics(tmp_path):
     assert "Global-local" not in svg and "Gate transitions" not in svg
 
 
-@pytest.mark.parametrize("power", [None, "1", "2"])
-def test_launcher_overrides_and_fresh_output_guard(tmp_path, power):
+@pytest.mark.parametrize(
+    "power, random_power, axis_power",
+    [(None, None, None), ("1", None, None), ("2", None, None),
+     ("2", "2", "1"), ("1", "2", None), (None, None, "1")],
+)
+def test_launcher_overrides_and_fresh_output_guard(tmp_path, power, random_power, axis_power):
     bash = shutil.which("bash")
     if sys.platform == "win32":
         candidate = Path("C:/Program Files/Git/bin/bash.exe")
@@ -309,9 +326,14 @@ def test_launcher_overrides_and_fresh_output_guard(tmp_path, power):
         "EXPECTED_L0_FRACTION": "0.03", "FEATURE_ACTIVATION": "relu",
         "BATCH_SIZE": "256", "GRAD_ACCUM": "2", "OUTPUT_DIR": "ignored-positional-wins",
     }
-    env.pop("RDM_WASSERSTEIN_POWER", None)
-    if power is not None:
-        env["RDM_WASSERSTEIN_POWER"] = power
+    for key, value in (
+        ("RDM_WASSERSTEIN_POWER", power),
+        ("RDM_RANDOM_WASSERSTEIN_POWER", random_power),
+        ("RDM_AXIS_WASSERSTEIN_POWER", axis_power),
+    ):
+        env.pop(key, None)
+        if value is not None:
+            env[key] = value
     command = [
         bash, "-c",
         'export PATH="$(cd "$1" && pwd):$(cd "$2" && pwd):$PATH"; shift 2; exec "$@"',
@@ -325,17 +347,33 @@ def test_launcher_overrides_and_fresh_output_guard(tmp_path, power):
     assert config.model.feature_activation == "relu"
     assert config.loss.lambda_rdm == 0.5 and config.loss.reconstruction_weight == 2
     assert config.loss.rdm_wasserstein_power == int(power or 2)
+    assert config.loss.random_wasserstein_power == int(random_power or power or 2)
+    assert config.loss.axis_wasserstein_power == int(axis_power or power or 2)
+    assert config.loss.rdm_random_wasserstein_power == (int(random_power) if random_power else None)
+    assert config.loss.rdm_axis_wasserstein_power == (int(axis_power) if axis_power else None)
     assert config.loss.rdm_target_scale == 3 and config.loss.expected_l0_fraction == 0.03
     assert config.train.batch_size == 256 and config.train.gradient_accumulation_steps == 2
     assert config.train.seed == 42 and config.train.max_steps == 10000
     assert config.train.resume_from is None and config.train.output_dir == str(output)
+    default_env = {key: value for key, value in env.items() if key != "OUTPUT_DIR"}
+    default_run = subprocess.run(
+        command[:-1], capture_output=True, encoding="utf-8", check=True, env=default_env,
+    )
+    default_output = default_run.stdout.splitlines()[-1]
+    expected_random = int(random_power or power or 2)
+    expected_axis = int(axis_power or power or 2)
+    tag = (f"wp{expected_random}" if expected_random == expected_axis
+           else f"wpr{expected_random}-wpa{expected_axis}")
+    assert f"-{tag}-axis" in default_output
     output.mkdir()
     blocked = subprocess.run(command, capture_output=True, encoding="utf-8", env=env)
     assert blocked.returncode == 1 and "Refusing existing output" in blocked.stderr
     assert not blocked.stdout
-    invalid = subprocess.run(
-        command, capture_output=True, encoding="utf-8",
-        env={**env, "RDM_WASSERSTEIN_POWER": "3"},
-    )
-    assert invalid.returncode == 2 and "must be 1 or 2" in invalid.stderr
-    assert not invalid.stdout
+    for key in (
+        "RDM_WASSERSTEIN_POWER", "RDM_RANDOM_WASSERSTEIN_POWER", "RDM_AXIS_WASSERSTEIN_POWER",
+    ):
+        invalid = subprocess.run(
+            command, capture_output=True, encoding="utf-8", env={**env, key: "3"},
+        )
+        assert invalid.returncode == 2 and f"{key} must be 1 or 2" in invalid.stderr
+        assert not invalid.stdout

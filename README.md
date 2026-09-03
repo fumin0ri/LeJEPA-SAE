@@ -84,6 +84,7 @@ Set `RDM_WASSERSTEIN_POWER=1` in the RDM-SAE launcher, or use
 The default is `2`, including when loading older configs that omit this field.
 Only integer `1` or `2` is accepted. This transport power is independent of the target shape
 `loss.lp_norm_parameter` (`1.0` for Laplace, `2.0` for Gaussian).
+Per-term overrides described below take precedence over this common setting.
 
 For sorted projected samples with difference `d = x_sorted - y_sorted`, both the random and
 coordinate-axis terms use `mean(abs(d))` for power 1, or the historical `mean(d.square())`
@@ -137,6 +138,48 @@ not imply equal regularization strength. For the Laplace target above, the theor
 not 0.05. Batch-level `dead_feature_fraction` is not a measure of permanent feature death;
 use pooled evaluation feature rates as well. No L1/L0 penalty, TopK, shrinkage or calibration
 is introduced by this ablation.
+
+### Mixed random W2 squared + axis W1
+
+Use separate transport powers to test the coordinate-axis leakage hypothesis while keeping
+the random-projection term quadratic:
+
+```text
+L = reconstruction_weight * L_rec
+  + lambda_rdm * W2_squared(random)
+  + lambda_rdm * axis_weight * W1(axis)
+```
+
+In the notation `L_rec + lambda_r * W2_squared + lambda_a * W1`, the existing controls map to
+`lambda_r = RDM_WEIGHT` and `lambda_a = RDM_WEIGHT * AXIS_WEIGHT` when reconstruction weight is 1.
+The reference below uses target scale 1.5, axis weight 4, `lambda_r=1`, and `lambda_a=4`:
+
+```bash
+RDM_TARGET_SCALE=1.5 AXIS_WEIGHT=4 RDM_WEIGHT=1 RECONSTRUCTION_WEIGHT=1 \
+  RDM_RANDOM_WASSERSTEIN_POWER=2 RDM_AXIS_WASSERSTEIN_POWER=1 \
+  EXPECTED_L0_FRACTION=0.05 SEED=42 MAX_STEPS=10000 \
+  bash scripts/run_rdm_sae.sh runs/rdm-sae/random-w2-axis-w1-scale1.5-axis4-seed42-steps10000
+```
+
+For direct CLI/config usage, set `loss.rdm_random_wasserstein_power=2` and
+`loss.rdm_axis_wasserstein_power=1`, alongside `loss.rdm_target_scale=1.5`, `loss.axis_weight=4`
+and `loss.lambda_rdm=1`. Both per-term fields default to `null` and independently inherit
+`loss.rdm_wasserstein_power`. Older configs and common W1/W2 controls therefore keep their
+behavior. A non-null per-term value must be integer 1 or 2; target shape remains separate.
+Unset per-term launcher environment variables also inherit the common power.
+
+The Python `rectified_lp_rdm_regularization` API accepts keyword-only
+`random_wasserstein_power` and `axis_wasserstein_power` with the same inheritance rule.
+All combinations use the same projections, target samples, target scale, reductions and
+view averaging. The per-term metric switches do not consume additional random numbers.
+
+RDM-SAE train/validation logs and history CSV record the **effective**
+`rdm_random_wasserstein_power` and `rdm_axis_wasserstein_power`; the existing
+`rdm_wasserstein_power` log is only the common fallback setting. Raw random/axis losses and
+their weighted preactivation gradient diagnostics follow their respective metrics.
+Default mixed-run output names contain `wpr2-wpa1` so they cannot collide with common-power runs.
+The previous W2/W2 and W1/W1 commands above remain the controls; keep per-term environment
+overrides unset when running those controls.
 
 ## Proposed model
 

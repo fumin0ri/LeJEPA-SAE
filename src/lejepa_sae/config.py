@@ -40,6 +40,8 @@ class LossConfig:
     lambda_rdm: float = 125.0
     rdm_target_scale: float = 1.0
     rdm_wasserstein_power: int = 2  # Transport cost power; independent of target shape p.
+    rdm_random_wasserstein_power: int | None = None  # None inherits the common power.
+    rdm_axis_wasserstein_power: int | None = None
     rdm_gradient_diagnostics: bool = False
     rdm_projections: int = 8192
     axis_projections: int = 512
@@ -56,6 +58,16 @@ class LossConfig:
     rate_temperature: float = 0.1
     rate_scale_floor: float = 1e-6
     rate_gradient_diagnostics: bool = False
+
+    @property
+    def random_wasserstein_power(self) -> int:
+        override = self.rdm_random_wasserstein_power
+        return self.rdm_wasserstein_power if override is None else override
+
+    @property
+    def axis_wasserstein_power(self) -> int:
+        override = self.rdm_axis_wasserstein_power
+        return self.rdm_wasserstein_power if override is None else override
 
 
 @dataclass
@@ -173,6 +185,10 @@ class ExperimentConfig:
             or self.loss.rdm_wasserstein_power not in (1, 2)
         ):
             raise ValueError("loss.rdm_wasserstein_power must be integer 1 or 2")
+        for name in ("rdm_random_wasserstein_power", "rdm_axis_wasserstein_power"):
+            power = getattr(self.loss, name)
+            if power is not None and (type(power) is not int or power not in (1, 2)):
+                raise ValueError(f"loss.{name} must be null or integer 1 or 2")
         if not isinstance(self.loss.rdm_gradient_diagnostics, bool):
             raise ValueError("loss.rdm_gradient_diagnostics must be boolean")
         if self.loss.rdm_gradient_diagnostics and self.model.type != "rdm_sae":
