@@ -80,7 +80,7 @@ def test_tiny_neox_layer16_hook_parity_without_weight_processing(dtype):
     assert model.cfg.dtype == dtype and model.cfg.device == "cpu"
 
 
-@pytest.mark.parametrize("model_type", ["proposed", "batch_topk_sae"])
+@pytest.mark.parametrize("model_type", ["proposed", "batch_topk_sae", "rdm_sae"])
 def test_official_cpu_end_to_end_from_cached_residuals(tmp_path, monkeypatch, model_type):
     official = pytest.importorskip("sae_probes")
     import numpy as np
@@ -100,6 +100,10 @@ def test_official_cpu_end_to_end_from_cached_residuals(tmp_path, monkeypatch, mo
 
     config = ExperimentConfig()
     config.model.type = model_type
+    if model_type == "rdm_sae":
+        config.model.num_local_views = 0
+        config.model.feature_activation = "relu_forward_leaky_backward"
+        config.loss.invariance_weight = 0
     config.model.d_llm = 4
     config.model.feature_dim = 16
     config.loss.axis_projections = 2

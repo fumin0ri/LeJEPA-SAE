@@ -18,7 +18,7 @@ from torch import nn
 from .comparison import METRIC_ALIASES, _canonical_metric
 from .config import ExperimentConfig, load_config
 from .evaluate import load_model
-from .models import JumpReLUSAE, SAEBase
+from .models import BatchTopKSAE, SAEBase
 from .probe_parity import hf_streamed_residual, tl_streamed_residual
 from .train import autocast_context
 
@@ -39,9 +39,8 @@ class ProbeSAEAdapter(nn.Module):
         if prefix_width is not None and not 1 <= prefix_width <= config.model.feature_dim:
             raise ValueError("prefix_width must be within the checkpoint feature width")
         if (
-            hasattr(model, "calibrated_threshold")
+            isinstance(model, BatchTopKSAE)
             and not torch.isfinite(model.calibrated_threshold)
-            and not isinstance(model, JumpReLUSAE)
         ):
             raise RuntimeError("checkpoint has no calibrated pointwise threshold")
         self.cfg = SimpleNamespace(

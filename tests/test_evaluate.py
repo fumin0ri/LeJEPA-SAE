@@ -58,6 +58,7 @@ def make_test_store(tmp_path):
         ("batch_topk_sae", {"full_reconstruction_mse", "fvu", "mean_l0"}),
         ("jump_relu_sae", {"full_reconstruction_mse", "fvu", "mean_l0"}),
         ("matryoshka_sae", {"full_reconstruction_mse", "fvu", "mean_l0"}),
+        ("rdm_sae", {"full_reconstruction_mse", "fvu", "mean_l0"}),
         ("proposed", {"global_local_mse", "support_jaccard"}),
     ],
 )
@@ -137,6 +138,9 @@ def test_evaluation_metrics_and_report_artifacts(
         ),
     )
     config.loss.axis_projections = 4
+    if model_type == "rdm_sae":
+        config.model.num_local_views = 0
+        config.loss.invariance_weight = 0
     config.baseline.k = 2
     config.baseline.matryoshka_group_sizes = [2, 2, 4, 4, 4]
     config.validate()
@@ -158,6 +162,9 @@ def test_evaluation_metrics_and_report_artifacts(
 
     assert expected_metrics <= result.keys()
     assert result["tokens"] == 5
+    if model_type == "rdm_sae":
+        assert "global_local_mse" not in result and "support_jaccard" not in result
+        assert "off_to_on" not in result
     if model_type == "proposed":
         assert result["off_to_on"] - result["on_to_off"] == pytest.approx(
             result["local_active_fraction"] - result["global_active_fraction"], abs=1e-7

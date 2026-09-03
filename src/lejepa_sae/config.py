@@ -7,8 +7,8 @@ from typing import Any, Literal
 
 import yaml
 
-ModelType = Literal["proposed", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"]
-MODEL_TYPES = {"proposed", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}
+ModelType = Literal["proposed", "rdm_sae", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"]
+MODEL_TYPES = {"proposed", "rdm_sae", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}
 FEATURE_ACTIVATIONS = {"relu", "relu_forward_leaky_backward"}
 MASK_SCALINGS = {"inverted", "sqrt", "none"}
 
@@ -38,6 +38,8 @@ class ModelConfig:
 @dataclass
 class LossConfig:
     lambda_rdm: float = 125.0
+    rdm_target_scale: float = 1.0
+    rdm_gradient_diagnostics: bool = False
     rdm_projections: int = 8192
     axis_projections: int = 512
     axis_weight: float = 1.0
@@ -123,7 +125,21 @@ class ExperimentConfig:
             or self.model.num_local_views < 0
         ):
             raise ValueError("model.num_local_views must be a non-negative integer")
-        if self.model.num_local_views == 0:
+        if self.model.type == "rdm_sae":
+            if self.model.num_local_views != 0:
+                raise ValueError("rdm_sae requires model.num_local_views=0")
+            if self.loss.invariance_weight != 0 or self.loss.rate_weight != 0:
+                raise ValueError("rdm_sae requires invariance_weight=0 and rate_weight=0")
+            if (
+                not math.isfinite(self.loss.reconstruction_weight)
+                or self.loss.reconstruction_weight <= 0
+            ):
+                raise ValueError("rdm_sae requires finite positive reconstruction_weight")
+            if not math.isfinite(self.loss.lambda_rdm) or self.loss.lambda_rdm < 0:
+                raise ValueError("rdm_sae requires finite non-negative lambda_rdm")
+            if self.baseline.dead_feature_window_tokens < 1:
+                raise ValueError("baseline.dead_feature_window_tokens must be positive")
+        elif self.model.num_local_views == 0:
             if self.model.type != "proposed":
                 raise ValueError("zero local views are only supported for model.type=proposed")
             if self.loss.invariance_weight != 0 or self.loss.rate_weight != 0:
@@ -144,16 +160,22 @@ class ExperimentConfig:
             raise ValueError("model.leaky_backward_slope must be in (0, 1]")
         if (
             self.model.feature_activation == "relu_forward_leaky_backward"
-            and self.model.type != "proposed"
+            and self.model.type not in {"proposed", "rdm_sae"}
         ):
             raise ValueError(
-                "relu_forward_leaky_backward is an ablation for model.type=proposed"
+                "relu_forward_leaky_backward is only supported for proposed and rdm_sae"
             )
+        if not math.isfinite(self.loss.rdm_target_scale) or self.loss.rdm_target_scale <= 0:
+            raise ValueError("loss.rdm_target_scale must be finite and positive")
+        if not isinstance(self.loss.rdm_gradient_diagnostics, bool):
+            raise ValueError("loss.rdm_gradient_diagnostics must be boolean")
+        if self.loss.rdm_gradient_diagnostics and self.model.type != "rdm_sae":
+            raise ValueError("rdm_gradient_diagnostics is only supported for rdm_sae")
         if self.loss.rdm_projections < 1:
             raise ValueError("loss.rdm_projections must be positive")
         if not 1 <= self.loss.axis_projections <= self.model.feature_dim:
             raise ValueError("loss.axis_projections must be in [1, model.feature_dim]")
-        if self.loss.axis_weight <= 0:
+        if not math.isfinite(self.loss.axis_weight) or self.loss.axis_weight <= 0:
             raise ValueError("loss.axis_weight must be positive")
         if not math.isfinite(self.loss.rate_weight) or self.loss.rate_weight < 0:
             raise ValueError("loss.rate_weight must be finite and non-negative")
@@ -170,21 +192,23 @@ class ExperimentConfig:
                 0 < self.loss.expected_l0_fraction < 1
             ):
                 raise ValueError("rate loss requires loss.expected_l0_fraction in (0, 1)")
-        if self.model.type == "proposed":
+        if self.model.type in {"proposed", "rdm_sae"}:
             if self.loss.target_distribution != "rectified_lp_distribution":
                 raise ValueError(
-                    "proposed requires loss.target_distribution=rectified_lp_distribution"
+                    "RDM models require loss.target_distribution=rectified_lp_distribution"
                 )
-            if self.loss.lp_norm_parameter <= 0:
+            if not math.isfinite(self.loss.lp_norm_parameter) or self.loss.lp_norm_parameter <= 0:
                 raise ValueError("loss.lp_norm_parameter must be positive")
+            if not math.isfinite(self.loss.mean_shift_value):
+                raise ValueError("loss.mean_shift_value must be finite")
             if self.loss.expected_l0_fraction is not None and not (
                 0.0 < self.loss.expected_l0_fraction < 1.0
             ):
                 raise ValueError("loss.expected_l0_fraction must be in (0, 1) or null")
             if self.loss.mode_of_sigma != "sigma_GN":
-                raise ValueError("proposed currently supports loss.mode_of_sigma=sigma_GN")
+                raise ValueError("RDM models currently support loss.mode_of_sigma=sigma_GN")
             if self.loss.projection_vectors_type != "random":
-                raise ValueError("proposed currently supports projection_vectors_type=random")
+                raise ValueError("RDM models currently support projection_vectors_type=random")
         else:
             if self.target_l0 < 1 or self.target_l0 > self.model.feature_dim:
                 raise ValueError("baseline k/derived target L0 must be in [1, model.feature_dim]")

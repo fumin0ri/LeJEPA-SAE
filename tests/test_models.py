@@ -356,10 +356,11 @@ def test_feature_activation_is_validated():
         config.validate()
 
 
-def test_leaky_backward_ablation_is_proposed_only():
-    config = tiny_config("batch_topk_sae")
+@pytest.mark.parametrize("model_type", ["batch_topk_sae", "jump_relu_sae", "matryoshka_sae"])
+def test_leaky_backward_is_not_enabled_on_topk_or_jumprelu_baselines(model_type):
+    config = tiny_config(model_type)
     config.model.feature_activation = "relu_forward_leaky_backward"
-    with pytest.raises(ValueError, match="model.type=proposed"):
+    with pytest.raises(ValueError, match="only supported for proposed and rdm_sae"):
         config.validate()
 
 

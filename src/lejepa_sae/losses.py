@@ -263,8 +263,12 @@ def rectified_lp_rdm_regularization(
     generator: torch.Generator | None = None,
     projection_vectors: torch.Tensor | None = None,
     axis_indices: torch.Tensor | None = None,
+    *,
+    target_scale: float = 1.0,
 ) -> RDMRegularizationOutput:
     """RDMReg: a single global view gets full weight; otherwise groups split 50:50."""
+    if not math.isfinite(target_scale) or target_scale <= 0:
+        raise ValueError("target_scale must be finite and positive")
     if isinstance(feature_views, list):
         if not feature_views:
             raise ValueError("At least one feature view is required")
@@ -309,6 +313,9 @@ def rectified_lp_rdm_regularization(
         sigma,
         generator,
     )
+    if target_scale != 1.0:
+        # Scale the whole rectified distribution (including its shift), preserving rho.
+        targets = targets * target_scale
     random_view_losses = sliced_wasserstein_2_with_projections(
         feature_tensor, targets, projection_vectors
     )

@@ -11,7 +11,7 @@ from transformers import AutoTokenizer
 
 from .config import ExperimentConfig, load_config
 from .data import ActivationWindowDataset
-from .models import build_model
+from .models import SAEBase, build_model
 from .reporting import load_training_history, write_evaluation_report
 from .train import activation_transition_metrics, autocast_context, seed_everything
 from .views import sample_dimension_masks
@@ -156,11 +156,7 @@ def evaluate(
             union = (global_support | local_support).sum(dim=1)
             jaccard_total += (intersection / union.clamp_min(1)).sum().item()
 
-        elif config.model.type in {
-            "batch_topk_sae",
-            "jump_relu_sae",
-            "matryoshka_sae",
-        }:
+        elif isinstance(model, SAEBase):
             with autocast_context(config):
                 full_output = model(residuals[:, 0])
             full_reconstruction_total += torch.nn.functional.mse_loss(
@@ -190,7 +186,7 @@ def evaluate(
         result["global_local_mse"] = invariance_total / evaluated
         result["support_jaccard"] = jaccard_total / evaluated
         result.update({key: value / evaluated for key, value in transition_totals.items()})
-    if config.model.type in {"batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}:
+    if isinstance(model, SAEBase):
         result["full_reconstruction_mse"] = full_reconstruction_total / evaluated
         residual_mean = residual_sum / evaluated
         residual_variance = float(

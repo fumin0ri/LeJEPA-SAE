@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lejepa-sae"
 version = "0.1.0"
-description = "Reconstruction-free sparse feature learning from LLM residual streams"
+description = "Sparse feature learning with RDM-regularized SAEs and JEPA from LLM residual streams"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

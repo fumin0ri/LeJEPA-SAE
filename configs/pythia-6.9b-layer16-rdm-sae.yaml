@@ -1,0 +1,50 @@
+# Reconstruction + RDM pilot. lambda_rdm=1 is a starting point, not a tuned optimum.
+data:
+  activation_dir: data/the-pile/pythia-6.9b/layer-16-ctx1024-100m
+  window_size: 1
+  train_stride: 1
+  eval_stride: 1
+  num_workers: 4
+
+model:
+  type: rdm_sae
+  d_llm: 4096
+  feature_dim: 16384
+  num_local_views: 0
+  feature_activation: relu_forward_leaky_backward
+  leaky_backward_slope: 0.1
+
+loss:
+  reconstruction_weight: 1.0
+  lambda_rdm: 1.0
+  rdm_target_scale: 1.0
+  rdm_gradient_diagnostics: true
+  rdm_projections: 8192
+  axis_projections: 512
+  axis_weight: 1.0
+  target_distribution: rectified_lp_distribution
+  lp_norm_parameter: 1.0
+  expected_l0_fraction: 0.05
+  mean_shift_value: 0.0
+  mode_of_sigma: sigma_GN
+  projection_vectors_type: random
+  invariance_weight: 0.0
+  rate_weight: 0.0
+
+train:
+  seed: 42
+  device: cuda
+  precision: bfloat16
+  batch_size: 512
+  gradient_accumulation_steps: 1
+  max_steps: 10000
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  warmup_steps: 2000
+  max_grad_norm: 1.0
+  log_every: 20
+  eval_every: 1000
+  checkpoint_every: 10000
+  eval_batches: 12
+  output_dir: runs/rdm-sae/pilot-seed42-steps10000
+  resume_from: null

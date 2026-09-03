@@ -2,6 +2,7 @@
 
 from .config import ExperimentConfig, load_config
 from .models import (
+    RDMSAE,
     BatchTopKSAE,
     JumpReLUSAE,
     MatryoshkaSAE,
@@ -15,6 +16,7 @@ __all__ = [
     "JumpReLUSAE",
     "MatryoshkaSAE",
     "ProposedModel",
+    "RDMSAE",
     "build_model",
     "load_config",
 ]

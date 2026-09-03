@@ -145,7 +145,9 @@ class _RectangleStep(torch.autograd.Function):
 class SAEBase(nn.Module):
     """Shared untied SAE with a learned decoder bias and constrained decoder columns."""
 
-    def __init__(self, model_config: ModelConfig, baseline_config: BaselineConfig, k: int) -> None:
+    def __init__(
+        self, model_config: ModelConfig, baseline_config: BaselineConfig, k: int | None = None
+    ) -> None:
         super().__init__()
         self.pre_bias = nn.Parameter(torch.zeros(model_config.d_llm))
         self.encoder = nn.Linear(model_config.d_llm, model_config.feature_dim)
@@ -158,7 +160,9 @@ class SAEBase(nn.Module):
             "last_active_token", torch.zeros(model_config.feature_dim, dtype=torch.long)
         )
         self.register_buffer("tokens_seen", torch.zeros((), dtype=torch.long))
-        self.register_buffer("calibrated_threshold", torch.tensor(float("nan")))
+        if k is not None:
+            # Preserve legacy baseline checkpoint keys. ReLU-RDM SAE needs no threshold.
+            self.register_buffer("calibrated_threshold", torch.tensor(float("nan")))
         nn.init.kaiming_uniform_(self.decoder.weight, a=math.sqrt(5))
         self.normalize_decoder_()
         with torch.no_grad():
@@ -213,6 +217,31 @@ class SAEBase(nn.Module):
         centered = residual_target - residual_target.mean(dim=0, keepdim=True)
         denominator = centered.square().sum(dim=-1).mean()
         return (numerator / denominator.clamp_min(1e-12)).nan_to_num(0.0)
+
+
+class RDMSAE(SAEBase):
+    """Full-token ReLU SAE; sparsity is encouraged only by distribution matching."""
+
+    def __init__(self, model_config: ModelConfig, baseline_config: BaselineConfig) -> None:
+        super().__init__(model_config, baseline_config)
+        self.feature_activation = model_config.feature_activation
+        self.leaky_backward_slope = model_config.leaky_backward_slope
+
+    def activate_features(self, preactivations: torch.Tensor) -> torch.Tensor:
+        if self.feature_activation == "relu":
+            return preactivations.relu()
+        if self.feature_activation == "relu_forward_leaky_backward":
+            return relu_forward_leaky_backward(preactivations, self.leaky_backward_slope)
+        raise RuntimeError(f"Unsupported feature activation: {self.feature_activation}")
+
+    def encode(self, residuals: torch.Tensor, *, pointwise: bool | None = None) -> torch.Tensor:
+        # Pointwise in both train and eval; no TopK or threshold calibration.
+        return self.activate_features(self.preactivations(residuals))
+
+    def forward(self, residuals: torch.Tensor, *, pointwise: bool | None = None) -> ModelOutput:
+        pre = self.preactivations(residuals)
+        features = self.activate_features(pre)
+        return ModelOutput(features, self.decode(features), pre)
 
 
 def batch_topk(values: torch.Tensor, k: int) -> torch.Tensor:
@@ -295,6 +324,8 @@ class MatryoshkaSAE(BatchTopKSAE):
 def build_model(config: ExperimentConfig) -> nn.Module:
     if config.model.type == "proposed":
         return ProposedModel(config.model)
+    if config.model.type == "rdm_sae":
+        return RDMSAE(config.model, config.baseline)
     if config.model.type == "batch_topk_sae":
         return BatchTopKSAE(config.model, config.baseline, config.target_l0)
     if config.model.type == "jump_relu_sae":

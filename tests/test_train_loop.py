@@ -17,6 +17,7 @@ from lejepa_sae.train import train
         ("proposed", "sqrt", "relu", 2),
         ("proposed", "sqrt", "relu_forward_leaky_backward", 2),
         ("proposed", "sqrt", None, 0),
+        ("rdm_sae", "none", None, 0),
         ("batch_topk_sae", "inverted", None, 2),
         ("jump_relu_sae", "inverted", None, 2),
         ("matryoshka_sae", "inverted", None, 2),
@@ -86,6 +87,9 @@ def test_end_to_end_cpu_training_and_checkpoint(
     )
     config.loss.rdm_projections = 4
     config.loss.axis_projections = 4
+    if model_type == "rdm_sae":
+        config.loss.lambda_rdm = 1
+        config.loss.rdm_gradient_diagnostics = True
     if num_local_views == 0:
         config.loss.invariance_weight = 0
         config.model.feature_activation = "relu_forward_leaky_backward"
@@ -163,6 +167,27 @@ def test_end_to_end_cpu_training_and_checkpoint(
         if model_type in {"batch_topk_sae", "matryoshka_sae"}:
             assert (run_dir / "threshold_calibration.json").exists()
             assert torch.isfinite(state["model"]["calibrated_threshold"])
+        if model_type == "rdm_sae":
+            from lejepa_sae.evaluate import load_model
+            from lejepa_sae.probing import ProbeSAEAdapter
+
+            assert not (run_dir / "threshold_calibration.json").exists()
+            assert "threshold_calibration" not in state
+            assert "calibrated_threshold" not in state["model"]
+            loaded = load_model(config, checkpoint, "cpu")
+            sample = torch.randn(3, 1, 8)
+            torch.testing.assert_close(
+                ProbeSAEAdapter(loaded, config).encode(sample), loaded.encode(sample)
+            )
+            for record in records:
+                assert record["loss"] == pytest.approx(
+                    record["reconstruction_contribution"] + record["rdm_contribution"], rel=1e-6
+                )
+                assert "auxk" not in record and "invariance" not in record
+                if record["kind"] == "train":
+                    assert "rdm_to_reconstruction_grad_ratio" in record
+                else:
+                    assert "rdm_to_reconstruction_grad_ratio" not in record
     if model_type == "batch_topk_sae" or rate_activation or num_local_views == 0:
         config.train.resume_from = str(checkpoint)
         config.train.max_steps = 3

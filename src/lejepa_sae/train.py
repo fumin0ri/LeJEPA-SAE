@@ -31,7 +31,7 @@ from .losses import (
     rectified_lp_rdm_regularization,
     target_rate_regularization,
 )
-from .models import JumpReLUSAE, SAEBase, build_model
+from .models import RDMSAE, BatchTopKSAE, JumpReLUSAE, SAEBase, build_model
 from .views import sample_dimension_masks
 
 
@@ -80,6 +80,29 @@ def stack_dimension_views(
     return residual_views, masks
 
 
+def compute_rdm(
+    feature_views: torch.Tensor,
+    config: ExperimentConfig,
+    axis_indices: torch.Tensor | None,
+):
+    return rectified_lp_rdm_regularization(
+        feature_views,
+        config.loss.rdm_projections,
+        config.loss.axis_projections,
+        config.loss.axis_weight,
+        config.loss.lp_norm_parameter,
+        (
+            config.loss.mean_shift_value
+            if config.loss.expected_l0_fraction is None
+            else generalized_gaussian_mean_shift_for_active_fraction(
+                config.loss.lp_norm_parameter, config.loss.expected_l0_fraction
+            )
+        ),
+        axis_indices=axis_indices,
+        target_scale=config.loss.rdm_target_scale,
+    )
+
+
 def compute_loss(
     model: nn.Module,
     residuals: torch.Tensor,
@@ -93,7 +116,7 @@ def compute_loss(
         raise ValueError(f"{model_type} requires one-token residual windows")
     token_residuals = residuals[:, 0]
 
-    if model_type in {"batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}:
+    if model_type in {"rdm_sae", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}:
         output = model(token_residuals, pointwise=False if model.training else None)
         if model.training:
             model.update_dead_features_(output.features)
@@ -129,14 +152,58 @@ def compute_loss(
 
         auxk = (
             output.reconstruction.new_zeros((), dtype=torch.float32)
-            if isinstance(model, JumpReLUSAE)
+            if isinstance(model, JumpReLUSAE | RDMSAE)
             else model.auxiliary_loss(
                 token_residuals, output.reconstruction, output.preactivations
             )
         )
         loss = config.loss.reconstruction_weight * reconstruction_objective
-        loss = loss + config.baseline.auxk_coefficient * auxk
-        metrics["auxk"] = auxk.detach()
+        if isinstance(model, RDMSAE):
+            reconstruction_contribution = loss
+            rdm_contribution = loss.new_zeros(())
+            if config.loss.lambda_rdm > 0:
+                rdm = compute_rdm(output.features.unsqueeze(0), config, axis_indices)
+                rdm_contribution = config.loss.lambda_rdm * rdm.loss
+                metrics.update({
+                    "distribution": rdm.loss.detach(),
+                    "random_distribution": rdm.random_loss.detach(),
+                    "axis_distribution": rdm.axis_loss.detach(),
+                })
+            loss = reconstruction_contribution + rdm_contribution
+            metrics.update({
+                "reconstruction_contribution": reconstruction_contribution.detach(),
+                "rdm_contribution": rdm_contribution.detach(),
+                "rdm_target_scale": loss.new_tensor(config.loss.rdm_target_scale),
+            })
+            if config.loss.expected_l0_fraction is not None:
+                metrics["expected_l0_fraction"] = loss.new_tensor(config.loss.expected_l0_fraction)
+            if (
+                include_diagnostics
+                and config.loss.rdm_gradient_diagnostics
+                and torch.is_grad_enabled()
+            ):
+                reconstruction_grad = torch.autograd.grad(
+                    reconstruction_contribution, output.preactivations, retain_graph=True
+                )[0]
+                reconstruction_rms = reconstruction_grad.detach().float().square().mean().sqrt()
+                rdm_rms = loss.new_zeros(())
+                if config.loss.lambda_rdm > 0:
+                    rdm_grad = torch.autograd.grad(
+                        rdm_contribution, output.preactivations, retain_graph=True
+                    )[0]
+                    rdm_rms = rdm_grad.detach().float().square().mean().sqrt()
+                metrics.update({
+                    "reconstruction_preactivation_grad_rms": reconstruction_rms,
+                    "rdm_preactivation_grad_rms": rdm_rms,
+                    "rdm_to_reconstruction_grad_ratio": (
+                        rdm_rms / reconstruction_rms.clamp_min(1e-12)
+                    ),
+                })
+            if not torch.isfinite(loss):
+                raise FloatingPointError("rdm_sae produced a non-finite loss")
+        else:
+            loss = loss + config.baseline.auxk_coefficient * auxk
+            metrics["auxk"] = auxk.detach()
         if isinstance(model, JumpReLUSAE):
             l0_surrogate = model.l0_surrogate(output.preactivations).sum(dim=-1).mean()
             warmup = min(
@@ -163,6 +230,9 @@ def compute_loss(
                     "feature_std": detached.float().std(dim=0, unbiased=False).mean(),
                 }
             )
+            if isinstance(model, RDMSAE):
+                metrics["l0_sparsity"] = metrics["active_fraction"]
+                metrics["l1_sparsity"] = l1_sparsity_metric(detached)
         return loss, metrics
 
     has_local_views = config.model.num_local_views > 0
@@ -191,22 +261,7 @@ def compute_loss(
             local_features,
             global_features.unsqueeze(0).expand_as(local_features),
         )
-    rdm = rectified_lp_rdm_regularization(
-        feature_views,
-        config.loss.rdm_projections,
-        config.loss.axis_projections,
-        config.loss.axis_weight,
-        config.loss.lp_norm_parameter,
-        (
-            config.loss.mean_shift_value
-            if config.loss.expected_l0_fraction is None
-            else generalized_gaussian_mean_shift_for_active_fraction(
-                config.loss.lp_norm_parameter,
-                config.loss.expected_l0_fraction,
-            )
-        ),
-        axis_indices=axis_indices,
-    )
+    rdm = compute_rdm(feature_views, config, axis_indices)
     base_loss = config.loss.lambda_rdm * rdm.loss
     if invariance is not None:
         base_loss = config.loss.invariance_weight * invariance + base_loss
@@ -384,7 +439,7 @@ def aggregate_metrics(metrics: list[dict[str, torch.Tensor]]) -> dict[str, float
 
 @torch.no_grad()
 def calibrate_batch_topk_threshold(
-    model: SAEBase,
+    model: BatchTopKSAE,
     loader: DataLoader,
     config: ExperimentConfig,
 ) -> dict[str, float]:
@@ -438,7 +493,7 @@ def evaluate_loss(
     config: ExperimentConfig,
 ) -> dict[str, float]:
     calibration = None
-    if isinstance(model, SAEBase) and not isinstance(model, JumpReLUSAE):
+    if isinstance(model, BatchTopKSAE):
         calibration = calibrate_batch_topk_threshold(model, loader, config)
     model.eval()
     collected = []
@@ -472,7 +527,7 @@ def save_checkpoint(
         "config": config.to_dict(),
         "torch_rng_state": torch.get_rng_state(),
     }
-    if isinstance(model, SAEBase) and torch.isfinite(model.calibrated_threshold):
+    if isinstance(model, BatchTopKSAE) and torch.isfinite(model.calibrated_threshold):
         checkpoint["threshold_calibration"] = {
             "threshold": float(model.calibrated_threshold),
             "target_l0": config.target_l0,
@@ -585,7 +640,9 @@ def train(config: ExperimentConfig) -> Path:
 
     for step in range(start_step + 1, config.train.max_steps + 1):
         step_axis_indices = None
-        if config.model.type == "proposed":
+        if config.model.type == "proposed" or (
+            config.model.type == "rdm_sae" and config.loss.lambda_rdm > 0
+        ):
             step_axis_indices = random_axis_indices(
                 config.loss.axis_projections,
                 config.model.feature_dim,
@@ -695,7 +752,7 @@ def train(config: ExperimentConfig) -> Path:
             last_checkpoint = save_checkpoint(output_dir, step, model, optimizer, scheduler, config)
             excluded_interval_seconds += time.monotonic() - checkpoint_started
 
-    if isinstance(model, SAEBase) and not isinstance(model, JumpReLUSAE):
+    if isinstance(model, BatchTopKSAE):
         calibration = calibrate_batch_topk_threshold(model, validation_loader, config)
         (output_dir / "threshold_calibration.json").write_text(
             json.dumps(calibration, indent=2), encoding="utf-8"

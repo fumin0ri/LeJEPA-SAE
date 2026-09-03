@@ -1,8 +1,81 @@
 # LeJEPA-SAE
 
-Reconstruction-free sparse feature discovery from individual LLM residual activations. The
-proposed model is the single-token dimension-mask JEPA; this repository contains no multi-token
-Transformer/CLS model.
+Sparse feature discovery from individual LLM residual activations. The new `rdm_sae` pilot
+combines reconstruction and RDMReg; the existing single-token dimension-mask JEPA (`proposed`)
+and SAE baselines remain available with their existing checkpoints. This repository contains
+no multi-token Transformer/CLS model.
+
+## Reconstruction + RDM SAE pilot
+
+`rdm_sae` uses one full residual token, with no masks, local views, invariance, rate loss,
+L1 penalty, TopK, AuxK, or threshold calibration:
+
+```text
+z = ReLU(W_enc (h - b_pre) + b_enc)
+h_hat = W_dec z + b_pre
+L = reconstruction_weight * mean((h_hat - h)^2)
+  + lambda_rdm * (L_random(z, target) + axis_weight * L_axis(z, target))
+```
+
+The untied decoder columns are initialized and maintained at unit norm, with encoder weights
+initialized to the decoder transpose. Inputs are not normalized; reconstruction MSE and RDM
+reductions use float32. RDM sees a **single view at full weight**, using 8192 random projections
+and 512 axes. Train, evaluation and probing all use the same pointwise encoder.
+
+The dedicated preset keeps width 16384, target active fraction 0.05, batch 512 / accumulation 1,
+seed 42, 10,000 optimizer steps (5.12M token presentations), and the shared AdamW/schedule.
+It starts from **fresh SAE initialization**, not a JEPA checkpoint. By default its forward is
+exact ReLU with leaky backward slope 0.1; select ordinary ReLU with `FEATURE_ACTIVATION=relu`.
+The original configs and comparison pipeline are unchanged; this launcher runs one model only.
+
+```bash
+bash scripts/run_rdm_sae.sh runs/rdm-sae/pilot-seed42-steps10000
+
+# Explicit weights and target amplitude; use a fresh output for every experiment.
+RDM_WEIGHT=1 RECONSTRUCTION_WEIGHT=1 RDM_TARGET_SCALE=1 \
+  EXPECTED_L0_FRACTION=0.05 LEAKY_BACKWARD_SLOPE=0.1 \
+  bash scripts/run_rdm_sae.sh runs/rdm-sae/custom-pilot
+```
+
+`lambda_rdm=1.0` is an **untuned starting point**, not a recommendation that the loss terms are
+balanced. The old JEPA value 125 is not assumed appropriate for raw reconstruction MSE.
+`loss.rdm_target_scale` multiplies the **whole rectified target**, including its effective mean
+shift: `target = scale * ReLU(GN_p(mu, sigma_GN))`. It changes target amplitude but preserves
+its expected active fraction (not a guarantee of the model's measured L0). Defaults to 1 for
+old checkpoints as well. Target shape/shift can also be changed through the existing loss config.
+Positive `reconstruction_weight` and non-negative `lambda_rdm` are required for `rdm_sae`;
+`RDM_WEIGHT=0` is a reconstruction-only control that skips RDM sampling/computation entirely.
+
+Train/validation logs include MSE, FVU, raw random/axis RDM, weighted reconstruction/RDM terms,
+and log-time active fraction, L0, feature std and dead fractions. With
+`loss.rdm_gradient_diagnostics=true` (preset default), log steps also measure each **weighted**
+term's gradient RMS at encoder preactivations, before gradient clipping/accumulation scaling.
+This includes the activation surrogate derivative; it is not an encoder-parameter gradient norm.
+Gradient diagnostics are omitted during validation and non-log batches. Compare their ratio and
+the validation MSE/FVU/L0 before choosing a new RDM weight; loss magnitudes alone are insufficient.
+L0 and FVU in training logs are per-batch diagnostics; standalone evaluation pools the test set.
+
+Other environment overrides: `FEATURE_DIM`, `SEED`, `MAX_STEPS`, `BATCH_SIZE`, `GRAD_ACCUM`,
+`EVAL_BATCHES`, `CHECKPOINT_EVERY`, `RDM_PROJECTIONS`, `AXIS_PROJECTIONS`, `AXIS_WEIGHT`,
+`RDM_GRADIENT_DIAGNOSTICS`, `CONFIG`, `OUTPUT_DIR` (positional output takes precedence).
+The launcher refuses existing outputs. On OOM, use a fresh output with `BATCH_SIZE=256 GRAD_ACCUM=2`,
+then `128/4` if needed; SWD then uses a smaller microbatch and is not numerically equivalent.
+For dataset/device/optimizer overrides or explicit resume, use `lejepa-train --config
+configs/pythia-6.9b-layer16-rdm-sae.yaml --set section.key=value` directly.
+
+```bash
+RUN=runs/rdm-sae/pilot-seed42-steps10000
+lejepa-evaluate --config "$RUN/config.resolved.yaml" \
+  --checkpoint "$RUN/checkpoint-00010000.pt" --output-dir "$RUN/evaluation"
+bash scripts/run_probe_pilot.sh smoke "$RUN"
+bash scripts/run_probe_pilot.sh probe "$RUN"
+```
+
+Evaluation generates `index.html` and training curves including active fraction, reconstruction/FVU,
+random/axis RDM, weighted losses and gradient balance. Probing needs no threshold calibration for
+`rdm_sae`; the existing hook-parity preflight and `normal`, k=1/16 task protocol are unchanged.
+The probe-pilot launcher expects a 10k-step checkpoint. Compare measured L0 (not only target rho),
+FVU and the same complete task set against BatchTopK and the retained RDM-only/JEPA runs.
 
 ## Proposed model
 
