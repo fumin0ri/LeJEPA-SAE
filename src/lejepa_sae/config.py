@@ -9,6 +9,7 @@ import yaml
 ModelType = Literal["proposed", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"]
 MODEL_TYPES = {"proposed", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"}
 FEATURE_ACTIVATIONS = {"relu", "relu_forward_leaky_backward"}
+MASK_SCALINGS = {"inverted", "sqrt", "none"}
 
 
 @dataclass
@@ -28,6 +29,7 @@ class ModelConfig:
     feature_dim: int = 16384
     num_local_views: int = 4
     dimension_keep_fraction: float = 0.5
+    mask_scaling: Literal["inverted", "sqrt", "none"] = "inverted"
     feature_activation: str = "relu"
     leaky_backward_slope: float = 0.01
 
@@ -114,6 +116,8 @@ class ExperimentConfig:
             raise ValueError("model.num_local_views must be positive")
         if not 0.0 < self.model.dimension_keep_fraction <= 1.0:
             raise ValueError("model.dimension_keep_fraction must be in (0, 1]")
+        if self.model.mask_scaling not in MASK_SCALINGS:
+            raise ValueError(f"model.mask_scaling must be one of {sorted(MASK_SCALINGS)}")
         if self.model.feature_activation not in FEATURE_ACTIVATIONS:
             raise ValueError(
                 f"model.feature_activation must be one of {sorted(FEATURE_ACTIVATIONS)}"

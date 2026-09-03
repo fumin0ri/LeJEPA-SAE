@@ -10,13 +10,15 @@ For one frozen residual activation `h_t ∈ R^4096`, the global view is complete
 local views retains an independently sampled, exact half of its coordinates. The shared encoder is:
 
 ```text
-h_t → subtract learned pre-bias → exact coordinate mask → inverted-mask scaling
+h_t → subtract learned pre-bias → exact coordinate mask → configurable mask scaling
     → Linear(4096, 16384) → ReLU → z
 ```
 
 Missing coordinates are therefore filled with the learned pre-bias and become zero after
 centering. The global and four local views are encoded in one batched Linear call. There is no
 Transformer, CLS token, decoder, target encoder, or stop-gradient.
+The default remains inverted scaling (`1/q`); the `sqrt` and `none` ablations below only
+change the local input multiplier.
 
 The objective is:
 
@@ -116,6 +118,51 @@ The output is deliberately separate from
 pre-axis checkpoints and starts from a fresh initialization. Do not resume a collapsed checkpoint:
 axis loss discourages feature death while gradients still cross ReLU, but cannot guarantee revival
 once every sample for a feature is in ReLU's negative region.
+
+### Mask scaling ablations at q=0.5
+
+`model.mask_scaling` controls scaling after masking the centered activation `x = h_t - b`:
+
+| Setting | Local input | Multiplier at q=0.5 |
+|---|---|---:|
+| `inverted` (default) | `m * x / q` | 2 |
+| `sqrt` | `m * x / sqrt(q)` | 1.41421356 |
+| `none` | `m * x` | 1 |
+
+All three retain exactly 2048 of 4096 coordinates, independently for every sample and local view.
+Global input remains `h_t - b`, including in the batched all-one-mask path. Missing coordinates
+remain centered zeros, and encoder bias is not scaled. The actual keep fraction after rounding
+determines the divisor when a different `q` is used.
+
+Run the new experiments from fresh initialization:
+
+```bash
+MASK_SCALING=sqrt bash scripts/run_proposed.sh
+MASK_SCALING=none bash scripts/run_proposed.sh
+```
+
+These use q=0.5 by default and append `-q0.5-mask-sqrt` or `-q0.5-mask-none` to the output
+directory. The original `inverted`/q=0.5 output path is unchanged. To combine with leaky backward,
+use the same environment variable with `scripts/run_leaky_backward.sh`. To change the keep rate,
+set `DIMENSION_KEEP_FRACTION`; direct CLI overrides are also supported:
+
+```bash
+lejepa-train --config configs/pythia-6.9b-layer16.yaml \
+  --set model.dimension_keep_fraction=0.5 \
+  --set model.mask_scaling=sqrt \
+  --set train.output_dir=runs/proposed-q0.5-mask-sqrt \
+  --set train.resume_from=null
+```
+
+Use the run's `config.resolved.yaml` for evaluation: the choice is saved in both that file and
+checkpoint config. Existing configs without `mask_scaling` continue to use `inverted`. Baseline
+SAEs are unmasked and unaffected. Start each ablation fresh rather than resuming another scaling
+mode's checkpoint.
+
+`sqrt` preserves the centered input's squared norm in expectation over the masks. It does **not**
+guarantee equal encoder preactivation variance when coordinates are correlated. Unlike `inverted`,
+it also changes the expected local linear projection: it is `sqrt(q)` times the global linear
+term (`q` times for `none`, before adding encoder bias). These are distinct training objectives.
 
 ### ReLU forward + leaky backward ablation
 

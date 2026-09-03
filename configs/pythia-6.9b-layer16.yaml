@@ -12,6 +12,7 @@ model:
   feature_dim: 16384
   num_local_views: 4
   dimension_keep_fraction: 0.5
+  mask_scaling: inverted  # inverted: divide by q; sqrt: divide by sqrt(q); none: no scaling
   feature_activation: relu
   leaky_backward_slope: 0.01
 

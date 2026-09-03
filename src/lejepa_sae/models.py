@@ -52,6 +52,7 @@ class SparseLinearFeatureEncoder(nn.Module):
         self.encoder = nn.Linear(config.d_llm, config.feature_dim)
         self.feature_activation = config.feature_activation
         self.leaky_backward_slope = config.leaky_backward_slope
+        self.mask_scaling = config.mask_scaling
         nn.init.zeros_(self.encoder.bias)
 
     def prepare_input(
@@ -69,7 +70,14 @@ class SparseLinearFeatureEncoder(nn.Module):
         retained_fraction = dimension_mask.float().mean(dim=-1, keepdim=True)
         if torch.any(retained_fraction == 0):
             raise ValueError("dimension_mask must retain at least one coordinate per item")
-        return centered * dimension_mask.to(centered.dtype) / retained_fraction
+        masked = centered * dimension_mask.to(centered.dtype)
+        if self.mask_scaling == "inverted":
+            return masked / retained_fraction
+        if self.mask_scaling == "sqrt":
+            return masked / retained_fraction.sqrt()
+        if self.mask_scaling == "none":
+            return masked
+        raise ValueError(f"Unsupported mask_scaling: {self.mask_scaling}")
 
     def encode_features(
         self,

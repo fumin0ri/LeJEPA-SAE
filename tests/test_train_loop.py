@@ -9,9 +9,17 @@ from lejepa_sae.train import train
 
 
 @pytest.mark.parametrize(
-    "model_type", ["proposed", "batch_topk_sae", "jump_relu_sae", "matryoshka_sae"]
+    ("model_type", "mask_scaling"),
+    [
+        ("proposed", "inverted"),
+        ("proposed", "sqrt"),
+        ("proposed", "none"),
+        ("batch_topk_sae", "inverted"),
+        ("jump_relu_sae", "inverted"),
+        ("matryoshka_sae", "inverted"),
+    ],
 )
-def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
+def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type, mask_scaling):
     activation_dir = tmp_path / "activations"
     shards = []
     for split_index, split in enumerate(("train", "validation", "test")):
@@ -55,6 +63,7 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
             d_llm=8,
             feature_dim=16,
             num_local_views=2,
+            mask_scaling=mask_scaling,
         ),
         train=TrainConfig(
             device="cpu",
@@ -81,6 +90,7 @@ def test_end_to_end_cpu_training_and_checkpoint(tmp_path, model_type):
     assert checkpoint.exists()
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     assert state["step"] == 2
+    assert state["config"]["model"]["mask_scaling"] == mask_scaling
     run_dir = tmp_path / f"run-{model_type}"
     assert (run_dir / "config.resolved.yaml").exists()
     training_plan = json.loads((run_dir / "training_plan.json").read_text())

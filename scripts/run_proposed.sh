@@ -6,13 +6,19 @@ feature_dim="${FEATURE_DIM:-16384}"
 expected_l0_fraction="${EXPECTED_L0_FRACTION:-0.009765625}"
 feature_activation="${FEATURE_ACTIVATION:-relu}"
 leaky_backward_slope="${LEAKY_BACKWARD_SLOPE:-0.01}"
+dimension_keep_fraction="${DIMENSION_KEEP_FRACTION:-0.5}"
+mask_scaling="${MASK_SCALING:-inverted}"
 axis_projections="${AXIS_PROJECTIONS:-512}"
 axis_weight="${AXIS_WEIGHT:-1.0}"
 activation_suffix=""
 if [[ "$feature_activation" != "relu" ]]; then
   activation_suffix="-$feature_activation-s$leaky_backward_slope"
 fi
-output_dir="${2:-runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d$feature_dim-l0-$expected_l0_fraction-axis$axis_projections$activation_suffix}"
+mask_suffix=""
+if [[ "$mask_scaling" != "inverted" || "$dimension_keep_fraction" != "0.5" ]]; then
+  mask_suffix="-q$dimension_keep_fraction-mask-$mask_scaling"
+fi
+output_dir="${2:-runs/the-pile/pythia-6.9b-layer16-ctx1024-100m/proposed-d$feature_dim-l0-$expected_l0_fraction-axis$axis_projections$activation_suffix$mask_suffix}"
 batch_size="${BATCH_SIZE:-512}"
 gradient_accumulation_steps="${GRADIENT_ACCUMULATION_STEPS:-1}"
 eval_batches="${EVAL_BATCHES:-12}"
@@ -30,6 +36,8 @@ lejepa-train --config "$config" \
   --set "loss.expected_l0_fraction=$expected_l0_fraction" \
   --set "model.feature_activation=$feature_activation" \
   --set "model.leaky_backward_slope=$leaky_backward_slope" \
+  --set "model.dimension_keep_fraction=$dimension_keep_fraction" \
+  --set "model.mask_scaling=$mask_scaling" \
   --set "loss.axis_projections=$axis_projections" \
   --set "loss.axis_weight=$axis_weight" \
   --set "train.batch_size=$batch_size" \

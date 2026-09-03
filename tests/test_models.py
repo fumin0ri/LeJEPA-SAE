@@ -228,9 +228,11 @@ def test_proposed_can_skip_expensive_diagnostics():
     assert "feature_std" not in metrics
 
 
-def test_batched_dimension_views_match_individual_forwards_and_gradients():
+@pytest.mark.parametrize("mask_scaling", ["inverted", "sqrt", "none"])
+def test_batched_dimension_views_match_individual_forwards_and_gradients(mask_scaling):
     torch.manual_seed(15)
     config = tiny_config()
+    config.model.mask_scaling = mask_scaling
     batched_model = build_model(config)
     loop_model = copy.deepcopy(batched_model)
     residuals = torch.randn(6, config.model.d_llm)
@@ -380,6 +382,7 @@ def test_main_preset_uses_single_token_paper_defaults():
     assert config.model.type == "proposed"
     assert config.data.window_size == 1
     assert config.model.num_local_views == 4
+    assert config.model.mask_scaling == "inverted"
     assert config.model.feature_dim == 16384
     assert config.model.feature_activation == "relu"
     assert config.model.leaky_backward_slope == 0.01
