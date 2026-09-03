@@ -77,6 +77,67 @@ random/axis RDM, weighted losses and gradient balance. Probing needs no threshol
 The probe-pilot launcher expects a 10k-step checkpoint. Compare measured L0 (not only target rho),
 FVU and the same complete task set against BatchTopK and the retained RDM-only/JEPA runs.
 
+### W1 versus W2-squared ablation
+
+Set `RDM_WASSERSTEIN_POWER=1` in the RDM-SAE launcher, or use
+`lejepa-train --config configs/pythia-6.9b-layer16-rdm-sae.yaml --set loss.rdm_wasserstein_power=1`.
+The default is `2`, including when loading older configs that omit this field.
+Only integer `1` or `2` is accepted. This transport power is independent of the target shape
+`loss.lp_norm_parameter` (`1.0` for Laplace, `2.0` for Gaussian).
+
+For sorted projected samples with difference `d = x_sorted - y_sorted`, both the random and
+coordinate-axis terms use `mean(abs(d))` for power 1, or the historical `mean(d.square())`
+for power 2. The latter is **W2 squared**, without a square root. Projection sampling, target
+sampling/scaling, float32 reductions, view weights, decoder constraints and activation behavior
+are unchanged. The existing `sliced_wasserstein_2_*` Python functions retain W2-squared behavior;
+the generic `sliced_wasserstein_with_projections` and `sliced_wasserstein_on_axes` functions accept
+the keyword-only `wasserstein_power=1|2`.
+
+Run each condition from fresh initialization with the same settings and data:
+
+```bash
+# Control: W2 squared
+RDM_TARGET_SCALE=1.5 AXIS_WEIGHT=4 RDM_WEIGHT=1 RDM_WASSERSTEIN_POWER=2 \
+  EXPECTED_L0_FRACTION=0.05 SEED=42 MAX_STEPS=10000 \
+  bash scripts/run_rdm_sae.sh runs/rdm-sae/w2-scale1.5-axis4-seed42-steps10000
+
+# Ablation: W1
+RDM_TARGET_SCALE=1.5 AXIS_WEIGHT=4 RDM_WEIGHT=1 RDM_WASSERSTEIN_POWER=1 \
+  EXPECTED_L0_FRACTION=0.05 SEED=42 MAX_STEPS=10000 \
+  bash scripts/run_rdm_sae.sh runs/rdm-sae/w1-scale1.5-axis4-seed42-steps10000
+```
+
+The preset keeps target shape Laplace, forward ReLU / leaky backward slope 0.1, batch 512,
+and accumulation 1. The automatically generated output name includes `wp1` or `wp2` and the
+axis weight; explicit positional output directories still take precedence.
+
+RDM-SAE train log steps and validation now include `active_fraction_gt_0`,
+`active_fraction_gt_1e-4`, `active_fraction_gt_1e-3`, `active_fraction_gt_1e-2`,
+`active_fraction_gt_5e-2`, and `active_fraction_gt_1e-1`. These measure strict `z > threshold`
+in float32 over all token-feature entries; they never threshold the actual encoder output.
+`active_fraction_gt_0` matches the existing strict `active_fraction`. Standalone
+`lejepa-evaluate` also exports these diagnostics in `metrics.json` and the report, pooling
+counts over evaluated tokens (including a short final batch), independently of `--support-epsilon`.
+It can therefore diagnose leakage in existing W2 checkpoints without retraining.
+
+With `RDM_GRADIENT_DIAGNOSTICS=true`, training log steps additionally record
+`rdm_random_preactivation_grad_rms` for `lambda_rdm * L_random` and
+`rdm_axis_preactivation_grad_rms` for `lambda_rdm * axis_weight * L_axis`.
+They include the activation surrogate derivative and are measured before gradient clipping
+or accumulation scaling. These RMS values do not add up to the combined RDM gradient RMS.
+They are omitted during validation and non-log steps, and are zero when `RDM_WEIGHT=0`.
+Training-history CSV and curves retain the transport power, threshold diagnostics and component
+gradients. Positive-activation quantiles are omitted to keep logging overhead bounded.
+
+Compare FVU, strict L0, thresholded activity and feature usage together. The existing
+`random_distribution` and `axis_distribution` logs use the configured metric, so their absolute
+values are not directly comparable between W1 and W2 squared. Equal loss coefficients also do
+not imply equal regularization strength. For the Laplace target above, the theoretical
+`P(target > t) = 0.05 * exp(-t / (1.5 / sqrt(2)))`; at `t=0.1` the reference is about 0.04550,
+not 0.05. Batch-level `dead_feature_fraction` is not a measure of permanent feature death;
+use pooled evaluation feature rates as well. No L1/L0 penalty, TopK, shrinkage or calibration
+is introduced by this ablation.
+
 ## Proposed model
 
 For one frozen residual activation `h_t ∈ R^4096`, the global view is complete and each of four

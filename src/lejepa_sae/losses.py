@@ -202,12 +202,20 @@ def random_axis_indices(
     return torch.randperm(feature_dim, device=device, generator=generator)[:num_axes]
 
 
-def sliced_wasserstein_2_with_projections(
+def _validate_wasserstein_power(wasserstein_power: int) -> None:
+    if type(wasserstein_power) is not int or wasserstein_power not in (1, 2):
+        raise ValueError("wasserstein_power must be integer 1 (W1) or 2 (W2 squared)")
+
+
+def sliced_wasserstein_with_projections(
     values: torch.Tensor,
     targets: torch.Tensor,
     projection_vectors: torch.Tensor,
+    *,
+    wasserstein_power: int = 2,
 ) -> torch.Tensor:
-    """Empirical sliced W2, optionally vectorized over a leading view dimension."""
+    """Mean empirical W1 or W2 squared; no root, optionally vectorized over views."""
+    _validate_wasserstein_power(wasserstein_power)
     if values.shape != targets.shape or values.ndim not in {2, 3}:
         raise ValueError(
             "values and targets must have the same [batch, features] or "
@@ -227,15 +235,19 @@ def sliced_wasserstein_2_with_projections(
         ).reshape(*leading_shape, projection_vectors.shape[0])
         projected_targets = projected_targets.sort(dim=-2).values
     difference = projected_values.float() - projected_targets.float()
-    return difference.square().mean(dim=(-2, -1))
+    cost = difference.abs() if wasserstein_power == 1 else difference.square()
+    return cost.mean(dim=(-2, -1))
 
 
-def sliced_wasserstein_2_on_axes(
+def sliced_wasserstein_on_axes(
     values: torch.Tensor,
     targets: torch.Tensor,
     axis_indices: torch.Tensor,
+    *,
+    wasserstein_power: int = 2,
 ) -> torch.Tensor:
-    """Empirical W2 on selected coordinate marginals without materializing one-hot vectors."""
+    """Mean W1 or W2 squared on coordinate marginals, without one-hot vectors."""
+    _validate_wasserstein_power(wasserstein_power)
     if values.shape != targets.shape or values.ndim not in {2, 3}:
         raise ValueError(
             "values and targets must have the same [batch, features] or "
@@ -250,7 +262,26 @@ def sliced_wasserstein_2_on_axes(
     with torch.no_grad():
         selected_targets = targets.index_select(-1, axis_indices).sort(dim=-2).values
     difference = selected_values.float() - selected_targets.float()
-    return difference.square().mean(dim=(-2, -1))
+    cost = difference.abs() if wasserstein_power == 1 else difference.square()
+    return cost.mean(dim=(-2, -1))
+
+
+def sliced_wasserstein_2_with_projections(
+    values: torch.Tensor,
+    targets: torch.Tensor,
+    projection_vectors: torch.Tensor,
+) -> torch.Tensor:
+    """Compatibility API: the historical loss is W2 squared, with no square root."""
+    return sliced_wasserstein_with_projections(values, targets, projection_vectors)
+
+
+def sliced_wasserstein_2_on_axes(
+    values: torch.Tensor,
+    targets: torch.Tensor,
+    axis_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Compatibility API for the historical coordinate-wise W2 squared loss."""
+    return sliced_wasserstein_on_axes(values, targets, axis_indices)
 
 
 def rectified_lp_rdm_regularization(
@@ -265,8 +296,10 @@ def rectified_lp_rdm_regularization(
     axis_indices: torch.Tensor | None = None,
     *,
     target_scale: float = 1.0,
+    wasserstein_power: int = 2,
 ) -> RDMRegularizationOutput:
     """RDMReg: a single global view gets full weight; otherwise groups split 50:50."""
+    _validate_wasserstein_power(wasserstein_power)
     if not math.isfinite(target_scale) or target_scale <= 0:
         raise ValueError("target_scale must be finite and positive")
     if isinstance(feature_views, list):
@@ -316,11 +349,11 @@ def rectified_lp_rdm_regularization(
     if target_scale != 1.0:
         # Scale the whole rectified distribution (including its shift), preserving rho.
         targets = targets * target_scale
-    random_view_losses = sliced_wasserstein_2_with_projections(
-        feature_tensor, targets, projection_vectors
+    random_view_losses = sliced_wasserstein_with_projections(
+        feature_tensor, targets, projection_vectors, wasserstein_power=wasserstein_power
     )
-    axis_view_losses = sliced_wasserstein_2_on_axes(
-        feature_tensor, targets, axis_indices
+    axis_view_losses = sliced_wasserstein_on_axes(
+        feature_tensor, targets, axis_indices, wasserstein_power=wasserstein_power
     )
     if random_view_losses.numel() == 1:
         random_loss = random_view_losses[0]

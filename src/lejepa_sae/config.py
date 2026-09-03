@@ -39,6 +39,7 @@ class ModelConfig:
 class LossConfig:
     lambda_rdm: float = 125.0
     rdm_target_scale: float = 1.0
+    rdm_wasserstein_power: int = 2  # Transport cost power; independent of target shape p.
     rdm_gradient_diagnostics: bool = False
     rdm_projections: int = 8192
     axis_projections: int = 512
@@ -167,6 +168,11 @@ class ExperimentConfig:
             )
         if not math.isfinite(self.loss.rdm_target_scale) or self.loss.rdm_target_scale <= 0:
             raise ValueError("loss.rdm_target_scale must be finite and positive")
+        if (
+            type(self.loss.rdm_wasserstein_power) is not int
+            or self.loss.rdm_wasserstein_power not in (1, 2)
+        ):
+            raise ValueError("loss.rdm_wasserstein_power must be integer 1 or 2")
         if not isinstance(self.loss.rdm_gradient_diagnostics, bool):
             raise ValueError("loss.rdm_gradient_diagnostics must be boolean")
         if self.loss.rdm_gradient_diagnostics and self.model.type != "rdm_sae":

@@ -24,6 +24,7 @@ from .data import (
     ShardAwareRandomSampler,
     validate_document_disjointness,
 )
+from .diagnostics import thresholded_active_counts
 from .losses import (
     generalized_gaussian_mean_shift_for_active_fraction,
     l1_sparsity_metric,
@@ -100,6 +101,7 @@ def compute_rdm(
         ),
         axis_indices=axis_indices,
         target_scale=config.loss.rdm_target_scale,
+        wasserstein_power=config.loss.rdm_wasserstein_power,
     )
 
 
@@ -174,6 +176,7 @@ def compute_loss(
                 "reconstruction_contribution": reconstruction_contribution.detach(),
                 "rdm_contribution": rdm_contribution.detach(),
                 "rdm_target_scale": loss.new_tensor(config.loss.rdm_target_scale),
+                "rdm_wasserstein_power": loss.new_tensor(config.loss.rdm_wasserstein_power),
             })
             if config.loss.expected_l0_fraction is not None:
                 metrics["expected_l0_fraction"] = loss.new_tensor(config.loss.expected_l0_fraction)
@@ -199,6 +202,19 @@ def compute_loss(
                         rdm_rms / reconstruction_rms.clamp_min(1e-12)
                     ),
                 })
+                for name in ("random", "axis"):
+                    component_rms = loss.new_zeros(())
+                    if config.loss.lambda_rdm > 0:
+                        component = rdm.random_loss if name == "random" else rdm.axis_loss
+                        weight = config.loss.lambda_rdm
+                        if name == "axis":
+                            weight *= config.loss.axis_weight
+                        component_grad = torch.autograd.grad(
+                            weight * component, output.preactivations, retain_graph=True
+                        )[0]
+                        component_rms = component_grad.detach().float().square().mean().sqrt()
+                        del component_grad
+                    metrics[f"rdm_{name}_preactivation_grad_rms"] = component_rms
             if not torch.isfinite(loss):
                 raise FloatingPointError("rdm_sae produced a non-finite loss")
         else:
@@ -231,6 +247,10 @@ def compute_loss(
                 }
             )
             if isinstance(model, RDMSAE):
+                metrics.update({
+                    key: count.float() / detached.numel()
+                    for key, count in thresholded_active_counts(detached).items()
+                })
                 metrics["l0_sparsity"] = metrics["active_fraction"]
                 metrics["l1_sparsity"] = l1_sparsity_metric(detached)
         return loss, metrics

@@ -11,7 +11,8 @@ from transformers import AutoTokenizer
 
 from .config import ExperimentConfig, load_config
 from .data import ActivationWindowDataset
-from .models import SAEBase, build_model
+from .diagnostics import thresholded_active_counts
+from .models import RDMSAE, SAEBase, build_model
 from .reporting import load_training_history, write_evaluation_report
 from .train import activation_transition_metrics, autocast_context, seed_everything
 from .views import sample_dimension_masks
@@ -101,6 +102,7 @@ def evaluate(
     residual_sum = torch.zeros(config.model.d_llm, dtype=torch.float64)
     residual_square_sum = torch.zeros(config.model.d_llm, dtype=torch.float64)
     evaluated = 0
+    threshold_counts: dict[str, int] = defaultdict(int)
 
     concept_labels: dict[str, str] = {}
     concept_active: dict[str, torch.Tensor] = defaultdict(lambda: torch.zeros(feature_dim))
@@ -118,6 +120,9 @@ def evaluate(
         with autocast_context(config):
             features = encode_features(model, residuals)
         feature_cpu = features.float().cpu()
+        if isinstance(model, RDMSAE):
+            for key, active_count in thresholded_active_counts(feature_cpu).items():
+                threshold_counts[key] += int(active_count)
         support = feature_cpu > support_epsilon
         count = features.shape[0]
         residual_float = residuals[:, 0].float()
@@ -182,6 +187,9 @@ def evaluate(
         "dead_feature_fraction": float((maxima <= support_epsilon).float().mean()),
         "mean_feature_std": float(variance.sqrt().mean()),
     }
+    result.update({
+        key: count / (evaluated * feature_dim) for key, count in threshold_counts.items()
+    })
     if config.model.type == "proposed" and config.model.num_local_views > 0:
         result["global_local_mse"] = invariance_total / evaluated
         result["support_jaccard"] = jaccard_total / evaluated

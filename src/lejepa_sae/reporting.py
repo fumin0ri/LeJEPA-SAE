@@ -125,6 +125,12 @@ TRAINING_HISTORY_FIELDS = [
     "kind",
     "step",
     "active_fraction",
+    "active_fraction_gt_0",
+    "active_fraction_gt_1e-4",
+    "active_fraction_gt_1e-3",
+    "active_fraction_gt_1e-2",
+    "active_fraction_gt_5e-2",
+    "active_fraction_gt_1e-1",
     "expected_l0_fraction",
     "global_active_fraction",
     "local_active_fraction",
@@ -155,10 +161,13 @@ TRAINING_HISTORY_FIELDS = [
     "loss",
     "distribution",
     "rdm_target_scale",
+    "rdm_wasserstein_power",
     "reconstruction_contribution",
     "rdm_contribution",
     "reconstruction_preactivation_grad_rms",
     "rdm_preactivation_grad_rms",
+    "rdm_random_preactivation_grad_rms",
+    "rdm_axis_preactivation_grad_rms",
     "rdm_to_reconstruction_grad_ratio",
     "l0",
     "reconstruction",
@@ -363,6 +372,8 @@ def write_training_curves_svg(
                 [
                     ("reconstruction_preactivation_grad_rms", "train", "Recon", "#2563eb"),
                     ("rdm_preactivation_grad_rms", "train", "RDM", "#ea580c"),
+                    ("rdm_random_preactivation_grad_rms", "train", "Random", "#059669"),
+                    ("rdm_axis_preactivation_grad_rms", "train", "Axis", "#be123c"),
                 ],
             ),
             (
@@ -371,6 +382,18 @@ def write_training_curves_svg(
                 [("rdm_to_reconstruction_grad_ratio", "train", "RDM / recon", "#2563eb")],
             ),
         ])
+        for kind in ("train", "validation"):
+            panels.append((
+                f"Thresholded active fractions ({kind})",
+                False,
+                [
+                    (f"active_fraction_gt_{label}", kind, f"> {label}", color)
+                    for label, color in (
+                        ("0", "#4f46e5"), ("1e-4", "#2563eb"), ("1e-3", "#0891b2"),
+                        ("1e-2", "#059669"), ("5e-2", "#ea580c"), ("1e-1", "#be123c"),
+                    )
+                ],
+            ))
         # This model has no local branch: do not show empty JEPA-only panels.
         panels = [
             panel for panel in panels

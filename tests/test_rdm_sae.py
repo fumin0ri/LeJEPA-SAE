@@ -47,8 +47,12 @@ def forbidden(*_args, **_kwargs):
 
 @pytest.mark.parametrize("activation", ["relu", "relu_forward_leaky_backward"])
 @pytest.mark.parametrize("mixed", [False, True])
-def test_rdm_sae_matches_direct_objective_and_parameter_gradients(monkeypatch, activation, mixed):
+@pytest.mark.parametrize("power", [1, 2])
+def test_rdm_sae_matches_direct_objective_and_parameter_gradients(
+    monkeypatch, activation, mixed, power
+):
     config = rdm_config()
+    config.loss.rdm_wasserstein_power = power
     config.model.feature_activation = activation
     config.model.leaky_backward_slope = 0.1
     model = build_model(config)
@@ -84,7 +88,7 @@ def test_rdm_sae_matches_direct_objective_and_parameter_gradients(monkeypatch, a
         rdm = rectified_lp_rdm_regularization(
             output.features.unsqueeze(0), 4, 4, 2, 1,
             generalized_gaussian_mean_shift_for_active_fraction(1, 0.05),
-            axis_indices=axes, target_scale=2,
+            axis_indices=axes, target_scale=2, wasserstein_power=power,
         )
         distribution = config.loss.lambda_rdm * rdm.loss
         expected = reconstruction + distribution
@@ -96,7 +100,12 @@ def test_rdm_sae_matches_direct_objective_and_parameter_gradients(monkeypatch, a
     assert shapes == [(6, 8)]
     assert not any("local" in name for name in metrics)
     assert {"invariance", "rate_loss", "auxk", "l0_penalty", "threshold"}.isdisjoint(metrics)
-    for key, term in [("reconstruction", reconstruction), ("rdm", distribution)]:
+    for key, term in [
+        ("reconstruction", reconstruction),
+        ("rdm", distribution),
+        ("rdm_random", config.loss.lambda_rdm * rdm.random_loss),
+        ("rdm_axis", config.loss.lambda_rdm * config.loss.axis_weight * rdm.axis_loss),
+    ]:
         grad = torch.autograd.grad(term, output.preactivations, retain_graph=True)[0]
         rms = grad.float().square().mean().sqrt()
         torch.testing.assert_close(metrics[f"{key}_preactivation_grad_rms"], rms)
@@ -128,8 +137,10 @@ def test_rdm_sae_pointwise_encoding_and_no_threshold_calibration(monkeypatch):
     assert "threshold" not in metrics
 
 
-def test_rdm_sae_diagnostics_are_optional_and_do_not_change_backward():
+@pytest.mark.parametrize("power", [1, 2])
+def test_rdm_sae_diagnostics_are_optional_and_do_not_change_backward(power):
     config = rdm_config()
+    config.loss.rdm_wasserstein_power = power
     model = build_model(config)
     reference = copy.deepcopy(model)
     inputs = torch.randn(6, 1, 8)
@@ -138,7 +149,11 @@ def test_rdm_sae_diagnostics_are_optional_and_do_not_change_backward():
     torch.manual_seed(52)
     other, full_metrics = compute_loss(reference, inputs, config)
     assert "distribution" in metrics and "reconstruction_contribution" in metrics
-    for key in ("l0", "active_fraction", "feature_std", "rdm_to_reconstruction_grad_ratio"):
+    for key in (
+        "l0", "active_fraction", "feature_std", "rdm_to_reconstruction_grad_ratio",
+        "active_fraction_gt_1e-3", "rdm_random_preactivation_grad_rms",
+        "rdm_axis_preactivation_grad_rms",
+    ):
         assert key not in metrics and key in full_metrics
     loss.backward()
     other.backward()
@@ -164,6 +179,8 @@ def test_zero_rdm_weight_is_pure_reconstruction_without_auxk_or_rng(monkeypatch)
     )
     torch.testing.assert_close(loss, expected)
     assert metrics["rdm_contribution"] == metrics["rdm_preactivation_grad_rms"] == 0
+    assert metrics["rdm_random_preactivation_grad_rms"] == 0
+    assert metrics["rdm_axis_preactivation_grad_rms"] == 0
     assert "distribution" not in metrics
     loss.backward()
     assert model.decoder.weight.grad is not None
@@ -172,11 +189,11 @@ def test_zero_rdm_weight_is_pure_reconstruction_without_auxk_or_rng(monkeypatch)
 def test_target_scale_multiplies_whole_target_and_preserves_support(monkeypatch):
     targets = []
 
-    def capture(values, target, _projections):
+    def capture(values, target, _projections, *, wasserstein_power):
         targets.append(target.detach().clone())
         return (values.float() - target.float()).square().mean(dim=(-2, -1))
 
-    monkeypatch.setattr("lejepa_sae.losses.sliced_wasserstein_2_with_projections", capture)
+    monkeypatch.setattr("lejepa_sae.losses.sliced_wasserstein_with_projections", capture)
     features = torch.randn(1, 64, 16).relu()
     for scale in [1, 3]:
         rectified_lp_rdm_regularization(
@@ -234,12 +251,14 @@ def test_rdm_preset_and_legacy_defaults():
     assert config.model.feature_activation == "relu_forward_leaky_backward"
     assert config.model.leaky_backward_slope == 0.1
     assert config.loss.lambda_rdm == config.loss.reconstruction_weight == 1
+    assert config.loss.rdm_wasserstein_power == 2
     assert config.loss.expected_l0_fraction == 0.05
     assert config.train.batch_size == 512 and config.train.gradient_accumulation_steps == 1
     assert config.train.max_steps == 10000 and config.train.eval_batches == 12
     assert config.train.resume_from is None
     legacy = load_config("configs/pythia-6.9b-layer16.yaml")
     assert legacy.loss.rdm_target_scale == 1
+    assert legacy.loss.rdm_wasserstein_power == 2
     assert not legacy.loss.rdm_gradient_diagnostics
     assert legacy.model.type == "proposed"
 
@@ -251,6 +270,11 @@ def test_rdm_diagnostic_curves_hide_absent_local_metrics(tmp_path):
     path = tmp_path / "metrics.jsonl"
     path.write_text(json.dumps(record), encoding="utf-8")
     history = load_training_history(path)
+    assert history[0]["active_fraction_gt_1e-3"] == record["active_fraction_gt_1e-3"]
+    assert history[0]["rdm_axis_preactivation_grad_rms"] == (
+        record["rdm_axis_preactivation_grad_rms"]
+    )
+    assert history[0]["rdm_wasserstein_power"] == 2
     assert history[0]["rdm_to_reconstruction_grad_ratio"] == (
         record["rdm_to_reconstruction_grad_ratio"]
     )
@@ -260,10 +284,12 @@ def test_rdm_diagnostic_curves_hide_absent_local_metrics(tmp_path):
     assert "Weighted reconstruction vs RDMReg" in svg
     assert "RDM / reconstruction gradient RMS" in svg
     assert "Active fraction" in svg and "Reconstruction and FVU" in svg
+    assert "Thresholded active fractions (train)" in svg
     assert "Global-local" not in svg and "Gate transitions" not in svg
 
 
-def test_launcher_overrides_and_fresh_output_guard(tmp_path):
+@pytest.mark.parametrize("power", [None, "1", "2"])
+def test_launcher_overrides_and_fresh_output_guard(tmp_path, power):
     bash = shutil.which("bash")
     if sys.platform == "win32":
         candidate = Path("C:/Program Files/Git/bin/bash.exe")
@@ -283,6 +309,9 @@ def test_launcher_overrides_and_fresh_output_guard(tmp_path):
         "EXPECTED_L0_FRACTION": "0.03", "FEATURE_ACTIVATION": "relu",
         "BATCH_SIZE": "256", "GRAD_ACCUM": "2", "OUTPUT_DIR": "ignored-positional-wins",
     }
+    env.pop("RDM_WASSERSTEIN_POWER", None)
+    if power is not None:
+        env["RDM_WASSERSTEIN_POWER"] = power
     command = [
         bash, "-c",
         'export PATH="$(cd "$1" && pwd):$(cd "$2" && pwd):$PATH"; shift 2; exec "$@"',
@@ -295,6 +324,7 @@ def test_launcher_overrides_and_fresh_output_guard(tmp_path):
     assert config.model.type == "rdm_sae" and config.model.num_local_views == 0
     assert config.model.feature_activation == "relu"
     assert config.loss.lambda_rdm == 0.5 and config.loss.reconstruction_weight == 2
+    assert config.loss.rdm_wasserstein_power == int(power or 2)
     assert config.loss.rdm_target_scale == 3 and config.loss.expected_l0_fraction == 0.03
     assert config.train.batch_size == 256 and config.train.gradient_accumulation_steps == 2
     assert config.train.seed == 42 and config.train.max_steps == 10000
@@ -303,3 +333,9 @@ def test_launcher_overrides_and_fresh_output_guard(tmp_path):
     blocked = subprocess.run(command, capture_output=True, encoding="utf-8", env=env)
     assert blocked.returncode == 1 and "Refusing existing output" in blocked.stderr
     assert not blocked.stdout
+    invalid = subprocess.run(
+        command, capture_output=True, encoding="utf-8",
+        env={**env, "RDM_WASSERSTEIN_POWER": "3"},
+    )
+    assert invalid.returncode == 2 and "must be 1 or 2" in invalid.stderr
+    assert not invalid.stdout

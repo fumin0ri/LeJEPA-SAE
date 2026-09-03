@@ -9,22 +9,23 @@ from lejepa_sae.train import train
 
 
 @pytest.mark.parametrize(
-    ("model_type", "mask_scaling", "rate_activation", "num_local_views"),
+    ("model_type", "mask_scaling", "rate_activation", "num_local_views", "rdm_power"),
     [
-        ("proposed", "inverted", None, 2),
-        ("proposed", "sqrt", None, 2),
-        ("proposed", "none", None, 2),
-        ("proposed", "sqrt", "relu", 2),
-        ("proposed", "sqrt", "relu_forward_leaky_backward", 2),
-        ("proposed", "sqrt", None, 0),
-        ("rdm_sae", "none", None, 0),
-        ("batch_topk_sae", "inverted", None, 2),
-        ("jump_relu_sae", "inverted", None, 2),
-        ("matryoshka_sae", "inverted", None, 2),
+        ("proposed", "inverted", None, 2, 2),
+        ("proposed", "sqrt", None, 2, 2),
+        ("proposed", "none", None, 2, 2),
+        ("proposed", "sqrt", "relu", 2, 2),
+        ("proposed", "sqrt", "relu_forward_leaky_backward", 2, 2),
+        ("proposed", "sqrt", None, 0, 2),
+        ("rdm_sae", "none", None, 0, 2),
+        ("rdm_sae", "none", None, 0, 1),
+        ("batch_topk_sae", "inverted", None, 2, 2),
+        ("jump_relu_sae", "inverted", None, 2, 2),
+        ("matryoshka_sae", "inverted", None, 2, 2),
     ],
 )
 def test_end_to_end_cpu_training_and_checkpoint(
-    tmp_path, model_type, mask_scaling, rate_activation, num_local_views
+    tmp_path, model_type, mask_scaling, rate_activation, num_local_views, rdm_power
 ):
     activation_dir = tmp_path / "activations"
     shards = []
@@ -86,6 +87,7 @@ def test_end_to_end_cpu_training_and_checkpoint(
         ),
     )
     config.loss.rdm_projections = 4
+    config.loss.rdm_wasserstein_power = rdm_power
     config.loss.axis_projections = 4
     if model_type == "rdm_sae":
         config.loss.lambda_rdm = 1
@@ -110,6 +112,7 @@ def test_end_to_end_cpu_training_and_checkpoint(
     assert state["step"] == 2
     assert state["config"]["model"]["mask_scaling"] == mask_scaling
     assert state["config"]["loss"]["rate_weight"] == config.loss.rate_weight
+    assert state["config"]["loss"]["rdm_wasserstein_power"] == rdm_power
     run_dir = tmp_path / f"run-{model_type}"
     assert (run_dir / "config.resolved.yaml").exists()
     training_plan = json.loads((run_dir / "training_plan.json").read_text())
@@ -180,17 +183,24 @@ def test_end_to_end_cpu_training_and_checkpoint(
                 ProbeSAEAdapter(loaded, config).encode(sample), loaded.encode(sample)
             )
             for record in records:
+                assert record["rdm_wasserstein_power"] == rdm_power
+                assert record["active_fraction_gt_0"] == record["active_fraction"]
+                assert 0 <= record["active_fraction_gt_1e-1"] <= record["active_fraction_gt_0"]
                 assert record["loss"] == pytest.approx(
                     record["reconstruction_contribution"] + record["rdm_contribution"], rel=1e-6
                 )
                 assert "auxk" not in record and "invariance" not in record
                 if record["kind"] == "train":
                     assert "rdm_to_reconstruction_grad_ratio" in record
+                    assert "rdm_axis_preactivation_grad_rms" in record
+                    assert "rdm_random_preactivation_grad_rms" in record
                 else:
                     assert "rdm_to_reconstruction_grad_ratio" not in record
+                    assert "rdm_axis_preactivation_grad_rms" not in record
     if model_type == "batch_topk_sae" or rate_activation or num_local_views == 0:
         config.train.resume_from = str(checkpoint)
         config.train.max_steps = 3
         resumed = train(config)
         resumed_state = torch.load(resumed, map_location="cpu", weights_only=False)
         assert resumed_state["step"] == 3
+        assert resumed_state["config"]["loss"]["rdm_wasserstein_power"] == rdm_power

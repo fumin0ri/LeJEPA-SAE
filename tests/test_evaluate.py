@@ -3,7 +3,7 @@ import json
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig, TrainConfig
 from lejepa_sae.evaluate import evaluate
@@ -145,7 +145,8 @@ def test_evaluation_metrics_and_report_artifacts(
     config.baseline.matryoshka_group_sizes = [2, 2, 4, 4, 4]
     config.validate()
     checkpoint = tmp_path / f"{model_type}.pt"
-    torch.save({"model": build_model(config).state_dict()}, checkpoint)
+    model = build_model(config)
+    torch.save({"model": model.state_dict()}, checkpoint)
     monkeypatch.setattr(
         "lejepa_sae.evaluate.AutoTokenizer.from_pretrained",
         lambda *_args, **_kwargs: FakeTokenizer(),
@@ -165,6 +166,16 @@ def test_evaluation_metrics_and_report_artifacts(
     if model_type == "rdm_sae":
         assert "global_local_mse" not in result and "support_jaccard" not in result
         assert "off_to_on" not in result
+        residuals = load_file(str(activation_dir / "test/shard-00000.safetensors"))["activations"]
+        with torch.no_grad():
+            features = model.encode(residuals)
+        for label, threshold in (
+            ("0", 0), ("1e-4", 1e-4), ("1e-3", 1e-3), ("1e-2", 1e-2),
+            ("5e-2", 5e-2), ("1e-1", 1e-1),
+        ):
+            # Five tokens in 2/2/1 batches: counts must be pooled, not batch-averaged.
+            expected = float(features.gt(threshold).sum()) / features.numel()
+            assert result[f"active_fraction_gt_{label}"] == pytest.approx(expected)
     if model_type == "proposed":
         assert result["off_to_on"] - result["on_to_off"] == pytest.approx(
             result["local_active_fraction"] - result["global_active_fraction"], abs=1e-7
