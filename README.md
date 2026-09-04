@@ -623,11 +623,15 @@ The probe phase uses official [`sae-probes==0.4.*`](https://github.com/sae-probe
 normalization, probe seed 42, and `k=[1,2,4,8,16,32,64,128,256,512]`. Before the first probe it
 checks the Hugging Face extraction hook against TransformerLens on identical token IDs. A raw
 residual dense logistic probe is run once as a separate reference ceiling. All five Matryoshka
-prefixes are also probed as supplementary results.
+prefixes are also probed as supplementary results. Each of the 15 checkpoints is additionally
+evaluated with a separate full-z GPU probe: every SAE coordinate is passed to a float32 PyTorch
+L2 logistic regression, with no top-k feature selection or input normalization. Its C value is
+selected by validation AUROC over the same grid and split protocol as the CPU probes.
 
 Probe aggregation refuses to produce a formal report unless every run has the identical complete
 task×k set. It writes `comparison/index.html`, `summary.md`, JSON/CSV summaries, all-k curves,
-paired per-task deltas, a L0/FVU/dead-feature table, and Matryoshka prefix results. Metrics are first
+paired per-task deltas, a L0/FVU/dead-feature table, full-z GPU summaries, and Matryoshka prefix
+results. Metrics are first
 macro-averaged across tasks within each seed and then reported as mean ± standard deviation over
 the three seeds.
 
@@ -669,6 +673,8 @@ R200="runs/your-rate200-run"
 BT_DIR="runs/pilot-comparison/seed42/batch-topk-k617-10k"
 
 bash scripts/run_probe_pilot.sh smoke "$R200" "$BT_DIR"
+# Independently smoke-test the full-z CUDA probe on the identical first task.
+bash scripts/run_probe_pilot.sh dense-smoke "$R200" "$BT_DIR"
 ```
 
 This does not train any models. It requires `config.resolved.yaml` and
@@ -680,6 +686,9 @@ tasks. Only after both smoke tests succeed, run all official tasks at the same t
 bash scripts/run_probe_pilot.sh probe "$R200" "$BT_DIR"
 # Optional additional checkpoints, evaluated with the identical task set and probe seed:
 bash scripts/run_probe_pilot.sh probe "$BASE_DIR" "$RATE100_DIR"
+
+# Full-z L2 logistic regression on CUDA for every official task.
+bash scripts/run_probe_pilot.sh dense "$R200" "$BT_DIR"
 ```
 
 The entry point preserves `normal`, L1, mean-activation normalization and probe seed 42.
@@ -710,6 +719,16 @@ lejepa-probe \
   --activation-batch-size 1 \
   --max-seq-len 1024 \
   --smoke-test
+
+lejepa-probe-dense-z \
+  --config "$R200/config.resolved.yaml" \
+  --checkpoint "$R200/checkpoint-00010000.pt" \
+  --results-path "$R200/dense-z-gpu-smoke" \
+  --model-cache-path data/sae-probes/pythia-6.9b-layer16 \
+  --llm-precision auto \
+  --activation-batch-size 1 \
+  --max-seq-len 1024 \
+  --smoke-test
 ```
 
 Each output contains `hook_parity.json`, `probe_manifest.json`, the official per-task raw JSON,
@@ -720,6 +739,15 @@ per-task class-weighted `test_f1`, not a replacement metric. Smoke outputs go to
 `probes-normal-k1-k16`. Rerun the same command to resume completed tasks. Different checkpoints,
 task sets, k sets, or precision/config changes require a new results directory; the official
 evaluator otherwise skips an existing task file even when k changes.
+
+The dense command requires CUDA and uses the checkpoint's complete feature width (16,384 in the
+main experiments). It uses the exact same official prompts, last-token residual cache, `normal`
+train/test split, and seed 42 as the sparse probe. Each dense output contains
+`dense_probe_manifest.json`, atomic per-task JSON under `dense_z_gpu/normal_setting/`, and—only
+after every selected task completes—`dense_z_probe_summary.json`. Smoke and full launcher outputs
+are `dense-z-gpu-smoke` and `dense-z-gpu-normal`, respectively. A rerun skips valid completed tasks;
+changing the checkpoint, task set, C grid, optimizer, precision, or config requires a new output
+directory.
 
 Activation caches are namespaced by no-processing mode, precision, context length and package
 versions, and accompanied by a provenance manifest. Legacy unversioned caches are not silently

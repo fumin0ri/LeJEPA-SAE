@@ -34,6 +34,7 @@ lejepa-train = "lejepa_sae.train:main"
 lejepa-evaluate = "lejepa_sae.evaluate:main"
 lejepa-intervene = "lejepa_sae.intervene:main"
 lejepa-probe = "lejepa_sae.probing:main"
+lejepa-probe-dense-z = "lejepa_sae.dense_probing:main"
 lejepa-compare = "lejepa_sae.comparison:main"
 lejepa-calibrate-jumprelu = "lejepa_sae.calibration:main"
 

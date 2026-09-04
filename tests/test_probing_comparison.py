@@ -5,8 +5,10 @@ import torch
 
 from lejepa_sae.calibration import choose_jumprelu_lambda, next_grid_lambda
 from lejepa_sae.comparison import (
+    aggregate_dense_probe_runs,
     aggregate_probe_runs,
     generate_comparison,
+    validate_complete_dense_tasks,
     validate_complete_tasks,
 )
 from lejepa_sae.config import DataConfig, ExperimentConfig, ModelConfig
@@ -103,6 +105,25 @@ def test_task_completeness_and_seed_aggregation():
     assert len(task_rows) == 8
 
 
+def test_dense_task_completeness_and_seed_aggregation():
+    records = {
+        "a": [
+            {"task": task, "feature_dim": 8, "best_c": 1.0, **metrics}
+            for task, metrics in (
+                ("task-a", {"f1": 0.5, "auroc": 0.6, "accuracy": 0.7}),
+                ("task-b", {"f1": 0.7, "auroc": 0.8, "accuracy": 0.9}),
+            )
+        ]
+    }
+    validate_complete_dense_tasks(records, ["task-a", "task-b"])
+    with pytest.raises(ValueError, match="dense z probe"):
+        validate_complete_dense_tasks({"a": records["a"][:-1]}, ["task-a", "task-b"])
+    runs = [{"name": "a", "series": "proposed_relu", "seed": 42, "feature_dim": 8}]
+    summary, task_rows = aggregate_dense_probe_runs(runs, records)
+    assert summary[0]["f1_mean"] == pytest.approx(0.6)
+    assert len(task_rows) == 2
+
+
 def test_comparison_report_artifacts(tmp_path):
     runs = []
     for seed, offset in ((42, 0.0), (43, 0.1), (44, 0.2)):
@@ -133,13 +154,32 @@ def test_comparison_report_artifacts(tmp_path):
             for row in _probe_rows(ks=(1, 2, 4, 8, 16, 32, 64, 128, 256, 512), offset=offset)
         ]
         (result_dir / "tasks.json").write_text(json.dumps(official_rows), encoding="utf-8")
+        dense_result_dir = tmp_path / f"dense-results-{seed}" / "dense_z_gpu"
+        dense_result_dir.mkdir(parents=True)
+        for task in ("task-a", "task-b"):
+            (dense_result_dir / f"{task}.json").write_text(
+                json.dumps(
+                    {
+                        "dataset": task,
+                        "feature_dim": 16384,
+                        "best_c": 1.0,
+                        "method": "dense_z_gpu_logistic_regression",
+                        "test_f1": 0.55 + offset,
+                        "test_auc": 0.65 + offset,
+                        "test_acc": 0.75 + offset,
+                    }
+                ),
+                encoding="utf-8",
+            )
         runs.append(
             {
                 "name": f"proposed-{seed}",
                 "series": "proposed_relu",
                 "seed": seed,
+                "feature_dim": 16384,
                 "run_dir": str(run_dir),
                 "results_dir": str(result_dir.parent),
+                "dense_results_dir": str(dense_result_dir.parent),
             }
         )
     manifest = tmp_path / "manifest.json"
@@ -157,5 +197,12 @@ def test_comparison_report_artifacts(tmp_path):
         "paired_task_deltas.csv",
         "representation_diagnostics.csv",
         "k_curves.svg",
+        "dense_z_probe_summary.csv",
+        "dense_z_probe_summary.json",
+        "dense_z_probe_task_results.csv",
+        "dense_z_probe_task_results.json",
     ):
         assert (output / name).is_file()
+    dense_summary = json.loads((output / "dense_z_probe_summary.json").read_text())
+    assert len(dense_summary) == 1
+    assert dense_summary[0]["f1_mean"] == pytest.approx(0.65)

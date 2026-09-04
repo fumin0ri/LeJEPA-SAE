@@ -1,17 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: bash scripts/run_probe_pilot.sh smoke|probe RUN_DIR [RUN_DIR ...]
+# Usage: bash scripts/run_probe_pilot.sh smoke|probe|dense-smoke|dense RUN_DIR [RUN_DIR ...]
 if (( $# < 2 )); then
-  echo "Usage: bash scripts/run_probe_pilot.sh smoke|probe RUN_DIR [RUN_DIR ...]" >&2
+  echo "Usage: bash scripts/run_probe_pilot.sh smoke|probe|dense-smoke|dense RUN_DIR [RUN_DIR ...]" >&2
   exit 2
 fi
 mode="$1"
 shift
 case "$mode" in
-  smoke) extra_args=(--smoke-test); suffix="probe-smoke-k1-k16" ;;
-  probe) extra_args=(); suffix="probes-normal-k1-k16" ;;
-  *) echo "Unknown mode: $mode (expected smoke or probe)" >&2; exit 2 ;;
+  smoke)
+    module="lejepa_sae.probing"
+    extra_args=(--ks 1 16 --smoke-test)
+    suffix="probe-smoke-k1-k16"
+    ;;
+  probe)
+    module="lejepa_sae.probing"
+    extra_args=(--ks 1 16)
+    suffix="probes-normal-k1-k16"
+    ;;
+  dense-smoke)
+    module="lejepa_sae.dense_probing"
+    extra_args=(--smoke-test)
+    suffix="dense-z-gpu-smoke"
+    ;;
+  dense)
+    module="lejepa_sae.dense_probing"
+    extra_args=()
+    suffix="dense-z-gpu-normal"
+    ;;
+  *) echo "Unknown mode: $mode (expected smoke, probe, dense-smoke, or dense)" >&2; exit 2 ;;
 esac
 
 # Check every run before loading any LLM. Never train or change existing checkpoints.
@@ -25,7 +43,7 @@ for run_dir in "$@"; do
 done
 
 for run_dir in "$@"; do
-  python -m lejepa_sae.probing \
+  python -m "$module" \
     --config "$run_dir/config.resolved.yaml" \
     --checkpoint "$run_dir/checkpoint-00010000.pt" \
     --results-path "$run_dir/$suffix" \
@@ -33,6 +51,5 @@ for run_dir in "$@"; do
     --llm-precision "${LLM_PRECISION:-auto}" \
     --activation-batch-size "${ACTIVATION_BATCH_SIZE:-1}" \
     --max-seq-len 1024 \
-    --ks 1 16 \
     "${extra_args[@]}"
 done

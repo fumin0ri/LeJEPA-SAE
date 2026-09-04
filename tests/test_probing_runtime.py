@@ -321,8 +321,18 @@ def test_summary_rejects_incomplete_or_invalid_results(tmp_path, official_stub, 
     assert not (tmp_path / "probe_summary.json").exists()
 
 
-@pytest.mark.parametrize("mode", ["smoke", "probe"])
-def test_pilot_launcher_preserves_paths_and_precision_flags(tmp_path, mode):
+@pytest.mark.parametrize(
+    ("mode", "module", "smoke", "sparse"),
+    [
+        ("smoke", "lejepa_sae.probing", True, True),
+        ("probe", "lejepa_sae.probing", False, True),
+        ("dense-smoke", "lejepa_sae.dense_probing", True, False),
+        ("dense", "lejepa_sae.dense_probing", False, False),
+    ],
+)
+def test_pilot_launcher_preserves_paths_and_precision_flags(
+    tmp_path, mode, module, smoke, sparse
+):
     bash = (
         str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe")
         if os.name == "nt"
@@ -351,9 +361,11 @@ def test_pilot_launcher_preserves_paths_and_precision_flags(tmp_path, mode):
         env=env,
     )
     args = result.stdout.splitlines()
-    assert args[:2] == ["-m", "lejepa_sae.probing"]
+    assert args[:2] == ["-m", module]
     assert args[args.index("--activation-batch-size") + 1] == "2"
     assert args[args.index("--llm-precision") + 1] == "bfloat16"
-    assert args[args.index("--ks") + 1 : args.index("--ks") + 3] == ["1", "16"]
-    assert ("--smoke-test" in args) == (mode == "smoke")
+    assert ("--ks" in args) == sparse
+    if sparse:
+        assert args[args.index("--ks") + 1 : args.index("--ks") + 3] == ["1", "16"]
+    assert ("--smoke-test" in args) == smoke
     assert "--skip-parity" not in args

@@ -11,6 +11,7 @@ import torch
 from .calibration import calibrate
 from .comparison import generate_comparison
 from .config import ExperimentConfig, load_config
+from .dense_probing import run_dense_z_probes
 from .probing import run_probes
 from .train import train
 
@@ -88,6 +89,9 @@ def make_run_manifest(
                     "config": str(run_dir / "config.resolved.yaml"),
                     "checkpoint": str(checkpoint) if checkpoint else None,
                     "results_dir": str(root / "probes" / series / f"seed-{seed}"),
+                    "dense_results_dir": str(
+                        root / "dense-z-probes" / series / f"seed-{seed}"
+                    ),
                     "prefix_results_dirs": (
                         {
                             str(width): str(
@@ -184,6 +188,13 @@ def run_pipeline(
                 model_cache_path,
                 parity=index == 0,
                 raw_residual=index == 0,
+            )
+            run_dense_z_probes(
+                config,
+                run["checkpoint"],
+                run["dense_results_dir"],
+                model_cache_path,
+                parity=False,
             )
             for width, prefix_results in run["prefix_results_dirs"].items():
                 run_probes(
