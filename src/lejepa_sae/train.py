@@ -30,6 +30,9 @@ from .losses import (
     l1_sparsity_metric,
     random_axis_indices,
     rectified_lp_rdm_regularization,
+    rectified_target_variance,
+    sample_orthonormal_sketch,
+    sketched_covariance_loss,
     target_rate_regularization,
 )
 from .models import RDMSAE, BatchTopKSAE, JumpReLUSAE, SAEBase, build_model
@@ -109,6 +112,14 @@ def compute_rdm(
     )
 
 
+def target_mean_shift(config: ExperimentConfig) -> float:
+    if config.loss.expected_l0_fraction is None:
+        return config.loss.mean_shift_value
+    return generalized_gaussian_mean_shift_for_active_fraction(
+        config.loss.lp_norm_parameter, config.loss.expected_l0_fraction
+    )
+
+
 def compute_loss(
     model: nn.Module,
     residuals: torch.Tensor,
@@ -181,7 +192,27 @@ def compute_loss(
                     "random_distribution": rdm.random_loss.detach(),
                     "axis_distribution": rdm.axis_loss.detach(),
                 })
-            loss = reconstruction_contribution + rdm_contribution
+            cov_contribution = loss.new_zeros(())
+            cov_weight = config.loss.rdm_cov_weight
+            if cov_weight > 0:
+                projection = sample_orthonormal_sketch(
+                    output.features.shape[-1],
+                    config.loss.rdm_cov_sketch_dim,
+                    device=output.features.device,
+                )
+                cov_loss = sketched_covariance_loss(
+                    output.features,
+                    projection,
+                    rectified_target_variance(
+                        config.loss.lp_norm_parameter,
+                        target_mean_shift(config),
+                        config.loss.rdm_target_scale,
+                    ),
+                )
+                cov_contribution = cov_weight * cov_loss
+                metrics["rdm_covariance"] = cov_loss.detach()
+            metrics["rdm_cov_contribution"] = cov_contribution.detach()
+            loss = reconstruction_contribution + rdm_contribution + cov_contribution
             metrics.update({
                 "reconstruction_contribution": reconstruction_contribution.detach(),
                 "rdm_contribution": rdm_contribution.detach(),
@@ -223,6 +254,7 @@ def compute_loss(
                 for name, weight, component in (
                     ("random", random_weight, random_contribution),
                     ("axis", axis_weight, axis_contribution),
+                    ("cov", cov_weight, cov_contribution),
                 ):
                     component_rms = loss.new_zeros(())
                     if weight > 0:

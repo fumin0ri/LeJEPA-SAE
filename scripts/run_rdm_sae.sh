@@ -38,9 +38,15 @@ metric_tag="wp${random_power}"
 if [[ "$random_power" != "$axis_power" ]]; then
   metric_tag="wpr${random_power}-wpa${axis_power}"
 fi
+cov_weight="${RDM_COV_WEIGHT:-0.0}"
+cov_sketch_dim="${RDM_COV_SKETCH_DIM:-64}"
+cov_tag=""
+if [[ "$cov_weight" != "0" && "$cov_weight" != "0.0" ]]; then
+  cov_tag="-cov${cov_weight}-k${cov_sketch_dim}"
+fi
 seed="${SEED:-42}"
 steps="${MAX_STEPS:-10000}"
-output_dir="${1:-${OUTPUT_DIR:-runs/rdm-sae/d${feature_dim}-rho${rho}-${activation}-slope${slope}-rec${reconstruction_weight}-rw${random_weight}-aw${axis_weight}-scale${target_scale}-${metric_tag}-seed${seed}-steps${steps}}}"
+output_dir="${1:-${OUTPUT_DIR:-runs/rdm-sae/d${feature_dim}-rho${rho}-${activation}-slope${slope}-rec${reconstruction_weight}-rw${random_weight}-aw${axis_weight}-scale${target_scale}-${metric_tag}${cov_tag}-seed${seed}-steps${steps}}}"
 if [[ ! -f "$config" ]]; then
   echo "Missing config: $config" >&2
   exit 1
@@ -67,7 +73,7 @@ exec lejepa-train --config "$config" \
   --set "loss.rdm_random_wasserstein_power=${RDM_RANDOM_WASSERSTEIN_POWER:-null}" \
   --set "loss.rdm_axis_wasserstein_power=${RDM_AXIS_WASSERSTEIN_POWER:-null}" \
   --set "loss.expected_l0_fraction=$rho" \
-  --set "loss.rdm_projections=${RDM_PROJECTIONS:-8192}" \
+  --set "loss.rdm_cov_weight=$cov_weight"   --set "loss.rdm_cov_sketch_dim=$cov_sketch_dim"   --set "loss.rdm_projections=${RDM_PROJECTIONS:-8192}" \
   --set "loss.axis_projections=${AXIS_PROJECTIONS:-512}" \
   --set "loss.rdm_gradient_diagnostics=${RDM_GRADIENT_DIAGNOSTICS:-true}" \
   --set "train.batch_size=${BATCH_SIZE:-512}" \

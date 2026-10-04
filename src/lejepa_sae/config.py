@@ -46,6 +46,9 @@ class LossConfig:
     rdm_random_wasserstein_power: int | None = None  # None inherits the common power.
     rdm_axis_wasserstein_power: int | None = None
     rdm_gradient_diagnostics: bool = False
+    # Sketched covariance regularizer for rdm_sae; 0 disables it and draws no random numbers.
+    rdm_cov_weight: float = 0.0
+    rdm_cov_sketch_dim: int = 64
     rdm_projections: int = 8192
     axis_projections: int = 512
     axis_weight: float = 1.0
@@ -216,6 +219,16 @@ class ExperimentConfig:
             power = getattr(self.loss, name)
             if power is not None and (type(power) is not int or power not in (1, 2)):
                 raise ValueError(f"loss.{name} must be null or integer 1 or 2")
+        if not math.isfinite(self.loss.rdm_cov_weight) or self.loss.rdm_cov_weight < 0:
+            raise ValueError("loss.rdm_cov_weight must be finite and non-negative")
+        if self.loss.rdm_cov_weight > 0:
+            if self.model.type != "rdm_sae":
+                raise ValueError("rdm_cov_weight is only supported for rdm_sae")
+            sketch = self.loss.rdm_cov_sketch_dim
+            if type(sketch) is not int or not 1 <= sketch <= self.model.feature_dim:
+                raise ValueError("loss.rdm_cov_sketch_dim must be an int in [1, feature_dim]")
+            if sketch >= self.train.batch_size:
+                raise ValueError("loss.rdm_cov_sketch_dim must be < train.batch_size")
         if not isinstance(self.loss.rdm_gradient_diagnostics, bool):
             raise ValueError("loss.rdm_gradient_diagnostics must be boolean")
         if self.loss.rdm_gradient_diagnostics and self.model.type != "rdm_sae":

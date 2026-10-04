@@ -389,6 +389,67 @@ def rectified_lp_rdm_regularization(
     )
 
 
+def sample_orthonormal_sketch(
+    feature_dim: int,
+    sketch_dim: int,
+    *,
+    device: torch.device,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Orthonormal [feature_dim, sketch_dim] frame via float32 reduced QR."""
+    if not 1 <= sketch_dim <= feature_dim:
+        raise ValueError("sketch_dim must satisfy 1 <= sketch_dim <= feature_dim")
+    raw = torch.randn(
+        feature_dim, sketch_dim, device=device, dtype=torch.float32, generator=generator
+    )
+    q, r = torch.linalg.qr(raw, mode="reduced")
+    return q * torch.where(r.diagonal() < 0, -1.0, 1.0)
+
+
+@lru_cache(maxsize=32)
+def rectified_target_variance(
+    lp_norm_parameter: float,
+    mean_shift_value: float,
+    target_scale: float = 1.0,
+    num_samples: int = 4_194_304,
+) -> float:
+    """Per-coordinate variance of target_scale * ReLU(mu + sigma * GN_p), by fixed-seed MC."""
+    generator = torch.Generator().manual_seed(20_240_917)
+    samples = sample_rectified_generalized_gaussian_like(
+        torch.empty(num_samples, dtype=torch.float64),
+        lp_norm_parameter,
+        mean_shift_value,
+        generator=generator,
+    )
+    return float((target_scale * samples).var(unbiased=False))
+
+
+def sketched_covariance_loss(
+    features: torch.Tensor,
+    projection: torch.Tensor,
+    target_variance: float,
+) -> torch.Tensor:
+    """||Cov(z R) / v - I_k||_F^2 / k^2 for independent target coordinates of variance v.
+
+    Orthonormal R maps a diagonal covariance v*I_d to v*I_k, so the target is isotropic
+    in the sketch. Dividing by v makes the loss invariant to the target amplitude. Float32,
+    centered, unbiased; it constrains second moments only, not the mean.
+    """
+    if features.ndim != 2 or projection.ndim != 2 or features.shape[1] != projection.shape[0]:
+        raise ValueError("expected features [B, D] and projection [D, k]")
+    batch, _ = features.shape
+    sketch_dim = projection.shape[1]
+    if batch <= sketch_dim:
+        raise ValueError("sketch_dim must be smaller than the batch size")
+    if not math.isfinite(target_variance) or target_variance <= 0:
+        raise ValueError("target_variance must be finite and positive")
+    z = features.float() @ projection.to(device=features.device, dtype=torch.float32)
+    z = z - z.mean(dim=0, keepdim=True)
+    covariance = z.T @ z / (batch - 1) / target_variance
+    identity = torch.eye(sketch_dim, device=features.device, dtype=torch.float32)
+    return (covariance - identity).square().mean()
+
+
 @torch.no_grad()
 def l1_sparsity_metric(features: torch.Tensor, epsilon: float = 1e-12) -> torch.Tensor:
     """Paper metric: mean (||z||_1 / ||z||_2)^2 / D over samples."""

@@ -81,6 +81,24 @@ random/axis RDM, weighted losses and gradient balance. Probing needs no threshol
 The probe-pilot launcher expects a 10k-step checkpoint. Compare measured L0 (not only target rho),
 FVU and the same complete task set against BatchTopK and the retained RDM-only/JEPA runs.
 
+### Sketched covariance regularizer (cov loss) ablation
+
+`loss.rdm_cov_weight > 0` (env `RDM_COV_WEIGHT`, `RDM_COV_SKETCH_DIM`, default 64) adds, from SAE-JEPA,
+`beta * ||Cov(z R)/v - I_k||_F^2 / k^2` with a fresh orthonormal `R` (QR) each step. Unlike SAE-JEPA
+(Gaussian latent, identity target), `z` is rectified, so the target is `v*I_k` where `v` is the
+per-coordinate variance of the rectified target (fixed-seed Monte Carlo). Weight 0 disables it and
+draws no random numbers. It constrains second moments only; the mean is left to the SW term.
+
+```bash
+# A: reconstruction + random-projection SW only      B: A + cov loss
+RDM_AXIS_WEIGHT=0 RDM_COV_WEIGHT=0 bash scripts/run_rdm_sae.sh runs/rdm-sae/A-random-only
+RDM_AXIS_WEIGHT=0 RDM_COV_WEIGHT=1 bash scripts/run_rdm_sae.sh runs/rdm-sae/B-random-cov
+lejepa-distribution --run A=runs/rdm-sae/A-random-only --run B=runs/rdm-sae/B-random-cov
+```
+
+`lejepa-distribution` evaluates held-out tokens against the target and prints a `reference` column
+(two i.i.d. target draws), the finite-sample noise floor. Judge shape by closeness to it.
+
 ### W1 versus W2-squared ablation
 
 Set `RDM_WASSERSTEIN_POWER=1` in the RDM-SAE launcher, or use
