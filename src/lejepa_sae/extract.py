@@ -17,6 +17,7 @@ from safetensors.torch import save_file
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
+from .activation_store import ResumeState, load_resume_state, shard_number
 from .data import document_split
 
 
@@ -28,6 +29,15 @@ class ShardWriter:
         self.pending_tokens: dict[str, int] = defaultdict(int)
         self.shard_indices: dict[str, int] = defaultdict(int)
         self.shards: list[dict[str, Any]] = []
+
+    def resume(self, shards: list[dict[str, Any]]) -> None:
+        """Continue after existing shards without overwriting any of them."""
+        self.shards = list(shards)
+        for shard in shards:
+            split = shard["split"]
+            self.shard_indices[split] = max(
+                self.shard_indices[split], shard_number(shard["file"]) + 1
+            )
 
     def add(
         self,
@@ -161,6 +171,23 @@ def _require_nonempty_dataset(
     return itertools.chain((first,), iterator)
 
 
+def _check_resume_compatible(args: argparse.Namespace, manifest: dict[str, Any] | None) -> None:
+    if manifest is None:
+        return
+    requested = {
+        "model": args.model,
+        "revision": args.revision,
+        "layer": args.layer,
+        "context_length": args.context_length,
+        "dtype": args.dtype,
+    }
+    for key, value in requested.items():
+        if key in manifest and manifest[key] != value:
+            raise ValueError(
+                f"Cannot resume: manifest has {key}={manifest[key]!r}, requested {value!r}"
+            )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract split-safe Pythia residual shards")
     parser.add_argument("--dataset", required=True, help="Hugging Face dataset name")
@@ -200,14 +227,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Extend an existing output directory: skip the source tokens it already covers "
+            "(re-tokenizing only), then append new shards. --max-source-tokens is the TOTAL "
+            "budget. Use after trim_activations.py or an interrupted run, with the same "
+            "dataset/split/seed. Document boundaries match to within about one shard per split."
+        ),
+    )
     return parser.parse_args()
 
 
 def extract(args: argparse.Namespace) -> Path:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if (output_dir / "manifest.json").exists():
-        raise FileExistsError(f"Refusing to overwrite existing extraction: {output_dir}")
+    manifest_path = output_dir / "manifest.json"
+    resume_state: ResumeState | None = None
+    if args.resume:
+        resume_state = load_resume_state(output_dir)
+        _check_resume_compatible(args, resume_state.manifest)
+        if (
+            args.max_source_tokens is not None
+            and args.max_source_tokens <= resume_state.source_tokens
+        ):
+            raise ValueError(
+                f"--max-source-tokens ({args.max_source_tokens:,}) is not above the "
+                f"{resume_state.source_tokens:,} source tokens already extracted"
+            )
+    elif manifest_path.exists():
+        raise FileExistsError(
+            f"Refusing to overwrite existing extraction: {output_dir} (use --resume to extend it)"
+        )
     if args.context_length < args.window_size:
         raise ValueError("context-length must be at least window-size")
     if args.max_source_tokens is not None and args.max_source_tokens <= 0:
@@ -250,6 +302,13 @@ def extract(args: argparse.Namespace) -> Path:
     counts: dict[str, int] = defaultdict(int)
     processed_documents = 0
     source_tokens_processed = 0
+    skip_source_tokens = 0
+    if resume_state is not None:
+        writer.resume(resume_state.shards)
+        counts.update(resume_state.counts)
+        skip_source_tokens = resume_state.source_tokens
+        print(f"Resuming after {skip_source_tokens:,} source tokens already extracted")
+    initial_activation_tokens = sum(counts.values())
     progress = tqdm(dataset, total=args.max_documents, desc="extracting documents")
     try:
         for index, example in enumerate(progress):
@@ -280,6 +339,9 @@ def extract(args: argparse.Namespace) -> Path:
                 )
                 token_ids = token_ids["input_ids"][0]
             if token_ids.numel() == 0:
+                continue
+            if source_tokens_processed < skip_source_tokens:
+                source_tokens_processed += int(token_ids.numel())
                 continue
             token_ids = _truncate_to_source_token_budget(
                 token_ids, source_tokens_processed, args.max_source_tokens
@@ -323,12 +385,17 @@ def extract(args: argparse.Namespace) -> Path:
     finally:
         handle.remove()
 
+    if source_tokens_processed < skip_source_tokens:
+        raise RuntimeError(
+            f"The source ended after {source_tokens_processed:,} tokens, before the "
+            f"{skip_source_tokens:,} already extracted; the dataset or --source-split differs"
+        )
     if processed_documents == 0 or source_tokens_processed == 0:
         raise RuntimeError(
             "The dataset yielded no usable source documents or tokens; check --data-files, "
             "--source-split, and --text-column"
         )
-    if sum(counts.values()) == 0:
+    if sum(counts.values()) == initial_activation_tokens:
         raise RuntimeError(
             "No activations were produced; check --window-size and the source sequence lengths"
         )
@@ -358,13 +425,22 @@ def extract(args: argparse.Namespace) -> Path:
         "split_seed": args.split_seed,
         "validation_fraction": args.validation_fraction,
         "test_fraction": args.test_fraction,
-        "documents_processed": processed_documents,
+        "documents_processed": processed_documents
+        + (resume_state.documents if resume_state is not None else 0),
         "max_source_tokens": args.max_source_tokens,
         "source_tokens_processed": source_tokens_processed,
         "tokens_by_split": dict(counts),
         "shards": shards,
     }
-    manifest_path = output_dir / "manifest.json"
+    if resume_state is not None:
+        manifest["resumed_from_source_tokens"] = skip_source_tokens
+        if resume_state.manifest is not None:
+            if resume_state.manifest.get("rebuilt_from_shards"):
+                manifest["rebuilt_from_shards"] = True
+            backup = output_dir / f"manifest.pre-resume-{int(time.time())}.json"
+            backup.write_text(
+                json.dumps(resume_state.manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest_path
 

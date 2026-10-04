@@ -323,6 +323,29 @@ lejepa-extract \
 Extraction refuses to overwrite an existing output directory. Choose a new directory or move the
 old extraction before rerunning with different settings.
 
+### Freeing disk space and regenerating activations
+
+The full cache is large, so it can be shrunk and later regrown. Extraction is deterministic for a
+fixed dataset, split seed, and source order, and a smaller `--max-source-tokens` run is a prefix of
+a larger one.
+
+```bash
+# 1. Preview, then keep only the leading half of every split (needs manifest.json;
+#    run scripts/rebuild_manifest.py first if it is missing). The old manifest is backed up.
+python scripts/trim_activations.py data/the-pile/pythia-6.9b/layer-16-ctx1024-100m
+python scripts/trim_activations.py data/the-pile/pythia-6.9b/layer-16-ctx1024-100m --apply
+
+# 2. Later, regrow it to the original budget; existing shards are never overwritten.
+RESUME=1 MAX_SOURCE_TOKENS=100000000 bash scripts/extract_the_pile.sh
+```
+
+`--resume` skips the source tokens the directory already covers (tokenizing only, no model
+forward), appends new shards, and treats `--max-source-tokens` as the total budget. It refuses a
+manifest whose model, revision, layer, context length, or dtype differ. Use the same dataset,
+source split, and split seed. Because each split is trimmed independently, the resume point is exact
+only to within about one shard per split; the manifest records `resumed_from_source_tokens`. Resuming
+can also regrow an extraction that crashed before writing its manifest.
+
 ## 2. Train the proposed model
 
 ```bash

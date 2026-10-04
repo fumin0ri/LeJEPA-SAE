@@ -14,6 +14,12 @@ if [[ -n "${DATA_FILES:-}" ]]; then
 fi
 max_source_tokens="${MAX_SOURCE_TOKENS:-100000000}"
 output_dir="${OUTPUT_DIR:-data/the-pile/pythia-6.9b/layer-16-ctx1024-100m}"
+# RESUME=1 extends an existing OUTPUT_DIR (e.g. after trim_activations.py) up to
+# MAX_SOURCE_TOKENS in total instead of refusing to overwrite it.
+resume_args=()
+if [[ -n "${RESUME:-}" ]]; then
+  resume_args=(--resume)
+fi
 
 lejepa-extract \
   --dataset "$dataset" \
@@ -28,4 +34,5 @@ lejepa-extract \
   --dtype bfloat16 \
   --shard-tokens 50000 \
   --max-source-tokens "$max_source_tokens" \
+  "${resume_args[@]}" \
   --output-dir "$output_dir"
