@@ -54,13 +54,15 @@ def distribution_metrics(
     target = target.float()
     n, d = features.shape
     device = features.device
-    generator = torch.Generator(device="cpu").manual_seed(seed)
+    generator = torch.Generator(device=device).manual_seed(seed)
     projection = random_unit_projections(
         projections, d, device=device, dtype=torch.float32, generator=generator
     )
     axis_indices = random_axis_indices(axes, d, device=device, generator=generator)
     sketch = sample_orthonormal_sketch(d, sketch_dim, device=device, generator=generator)
-    subset = torch.randperm(d, generator=generator)[:cov_features].to(device)
+    subset = torch.randperm(
+        d, generator=torch.Generator().manual_seed(seed)
+    )[:cov_features].to(device)
 
     mean = features.mean(0)
     variance = features.var(0, unbiased=False)

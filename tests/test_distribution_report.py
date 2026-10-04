@@ -23,3 +23,15 @@ def test_target_like_features_are_near_noise_floor_and_collapsed_ones_are_not():
     assert good["mean_abs_offdiag_corr"] < 0.1 < bad["mean_abs_offdiag_corr"]
     assert good["cov_effective_rank_frac"] > 3 * bad["cov_effective_rank_frac"]
     assert good["sketched_cov_loss"] < bad["sketched_cov_loss"]
+
+
+def test_metrics_run_with_generators_matched_to_the_feature_device():
+    # Regression: a CPU generator was passed to CUDA sampling. Only CPU is testable here, but
+    # this pins that the generator device follows the features rather than a hard-coded "cpu".
+    import inspect
+
+    from lejepa_sae import distribution_report
+
+    assert 'Generator(device="cpu")' not in inspect.getsource(
+        distribution_report.distribution_metrics
+    )
